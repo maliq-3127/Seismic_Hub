@@ -1,6 +1,6 @@
-# gyro_hub
+# Seismic_Hub
 
-A new Flutter project.
+A program designed to detect earthquakes and seismic activity.
 
 ## Getting Started
 
