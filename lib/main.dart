@@ -5,14 +5,18 @@ import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart'; 
 import 'package:firebase_database/firebase_database.dart';
-import 'package:sensors_plus/sensors_plus.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' hide Path;
 import 'package:geolocator/geolocator.dart';
 import 'dart:math' as math;
 import 'dart:async';
-import 'disturbance_detector.dart';
 import 'firebase_options.dart';
+import 'models/seismic_models.dart';
+import 'processing/isolate_messages.dart';
+import 'sensors/sensor_polling_service.dart';
+import 'services/clock_sync_service.dart';
+import 'services/throttle_mitigation_service.dart';
+import 'services/hub_hypocentre_service.dart';
 
 // ----------------------------------------------------------------------
 // HIGH EFFICIENCY BACKGROUND ISOLATE WORKERS
@@ -70,7 +74,6 @@ List<TectonicLineData> parseTectonicJsonInBackground(String jsonStr) {
         }
         
         int colorVal = _getStepClassColorValue(stepClass);
-
         double minLat = 90.0, maxLat = -90.0, minLng = 180.0, maxLng = -180.0;
         bool hasBbox = false;
 
@@ -84,7 +87,6 @@ List<TectonicLineData> parseTectonicJsonInBackground(String jsonStr) {
 
         if (feature['geometry'] is Map) {
           var geom = feature['geometry'];
-          
           if (geom['type'] == 'LineString' && geom['coordinates'] is List) {
             List<List<double>> points = [];
             for (var pt in geom['coordinates']) {
@@ -137,155 +139,22 @@ List<TectonicLineData> parseTectonicJsonInBackground(String jsonStr) {
 }
 
 // ----------------------------------------------------------------------
-// TDOA CALCULATOR HELPER
-// ----------------------------------------------------------------------
-class TdoaResult {
-  final LatLng location;
-  final double depthMeters;
-  final double waveSpeedMps;
-  final bool is3D;
-
-  TdoaResult({
-    required this.location,
-    required this.depthMeters,
-    required this.waveSpeedMps,
-    required this.is3D,
-  });
-}
-
-TdoaResult? _calculateTdoaEpicenter(List<Map<String, dynamic>> readings) {
-  if (readings.length < 3) return null;
-
-  const double v = 3500.0; 
-
-  var n1 = readings[0];
-  double lat1 = (n1['lat'] as num).toDouble();
-  double lng1 = (n1['lng'] as num).toDouble();
-  double t1 = (n1['timestamp_us'] as num).toDouble() / 1000000.0;
-
-  double latToMeters = 111320.0;
-  double lngToMeters = 111320.0 * math.cos(lat1 * math.pi / 180.0);
-
-  if (readings.length >= 4) {
-    var n2 = readings[1];
-    var n3 = readings[2];
-    var n4 = readings[3];
-
-    double x2 = ((n2['lng'] as num).toDouble() - lng1) * lngToMeters;
-    double y2 = ((n2['lat'] as num).toDouble() - lat1) * latToMeters;
-    double t2 = (n2['timestamp_us'] as num).toDouble() / 1000000.0;
-    double r2 = v * (t2 - t1);
-
-    double x3 = ((n3['lng'] as num).toDouble() - lng1) * lngToMeters;
-    double y3 = ((n3['lat'] as num).toDouble() - lat1) * latToMeters;
-    double t3 = (n3['timestamp_us'] as num).toDouble() / 1000000.0;
-    double r3 = v * (t3 - t1);
-
-    double x4 = ((n4['lng'] as num).toDouble() - lng1) * lngToMeters;
-    double y4 = ((n4['lat'] as num).toDouble() - lat1) * latToMeters;
-    double t4 = (n4['timestamp_us'] as num).toDouble() / 1000000.0;
-    double r4 = v * (t4 - t1);
-
-    double k2 = x2 * x2 + y2 * y2 - r2 * r2;
-    double k3 = x3 * x3 + y3 * y3 - r3 * r3;
-    double k4 = x4 * x4 + y4 * y4 - r4 * r4;
-
-    double a11 = 2 * x2, a12 = 2 * y2, a13 = 2 * r2;
-    double a21 = 2 * x3, a22 = 2 * y3, a23 = 2 * r3;
-    double a31 = 2 * x4, a32 = 2 * y4, a33 = 2 * r4;
-
-    double detA = a11 * (a22 * a33 - a23 * a32) -
-                  a12 * (a21 * a33 - a23 * a31) +
-                  a13 * (a21 * a32 - a22 * a31);
-
-    if (detA.abs() > 1e-6) {
-      double detX = k2 * (a22 * a33 - a23 * a32) -
-                    a12 * (k3 * a33 - a23 * k4) +
-                    a13 * (k3 * a32 - a22 * k4);
-      double x = detX / detA;
-
-      double detY = a11 * (k3 * a33 - a23 * k4) -
-                    k2 * (a21 * a33 - a23 * a31) +
-                    a13 * (a21 * k4 - k3 * a31);
-      double y = detY / detA;
-
-      double detD = a11 * (a22 * k4 - k3 * a32) -
-                    a12 * (a21 * k4 - k3 * a31) +
-                    k2 * (a21 * a32 - a22 * a31);
-      double d1 = detD / detA;
-
-      double zSquared = (d1 * d1) - (x * x) - (y * y);
-      double depthMeters = zSquared > 0 ? math.sqrt(zSquared) : 0.0;
-
-      double finalLat = lat1 + (y / latToMeters);
-      double finalLng = lng1 + (x / lngToMeters);
-
-      double d12 = const Distance().as(LengthUnit.Meter, LatLng(lat1, lng1), LatLng((n2['lat'] as num).toDouble(), (n2['lng'] as num).toDouble()));
-      double dt12 = t2 - t1;
-      double calcSpeed = dt12 > 0 ? (d12 / dt12) : v;
-
-      return TdoaResult(
-        location: LatLng(finalLat, finalLng),
-        depthMeters: depthMeters,
-        waveSpeedMps: calcSpeed,
-        is3D: true,
-      );
-    }
-  }
-
-  var n2 = readings[1];
-  var n3 = readings[2];
-
-  double x2 = ((n2['lng'] as num).toDouble() - lng1) * lngToMeters;
-  double y2 = ((n2['lat'] as num).toDouble() - lat1) * latToMeters;
-  double t2 = (n2['timestamp_us'] as num).toDouble() / 1000000.0;
-  double r2 = v * (t2 - t1);
-
-  double x3 = ((n3['lng'] as num).toDouble() - lng1) * lngToMeters;
-  double y3 = ((n3['lat'] as num).toDouble() - lat1) * latToMeters;
-  double t3 = (n3['timestamp_us'] as num).toDouble() / 1000000.0;
-  double r3 = v * (t3 - t1);
-
-  double c2 = x2 * x2 + y2 * y2 - r2 * r2;
-  double c3 = x3 * x3 + y3 * y3 - r3 * r3;
-
-  double det2D = (2 * x2 * 2 * y3) - (2 * y2 * 2 * x3);
-  if (det2D.abs() < 1e-6) {
-    double eps = 0.001;
-    double w1 = 1.0 / eps;
-    double w2 = 1.0 / ((t2 - t1) + eps);
-    double w3 = 1.0 / ((t3 - t1) + eps);
-    double totalW = w1 + w2 + w3;
-    double epiLat = (lat1 * w1 + (n2['lat'] as num).toDouble() * w2 + (n3['lat'] as num).toDouble() * w3) / totalW;
-    double epiLng = (lng1 * w1 + (n2['lng'] as num).toDouble() * w2 + (n3['lng'] as num).toDouble() * w3) / totalW;
-    return TdoaResult(location: LatLng(epiLat, epiLng), depthMeters: 0.0, waveSpeedMps: v, is3D: false);
-  }
-
-  double x = (c2 * (2 * y3) - (2 * y2) * c3) / det2D;
-  double y = ((2 * x2) * c3 - c2 * (2 * x3)) / det2D;
-
-  double finalLat = lat1 + (y / latToMeters);
-  double finalLng = lng1 + (x / lngToMeters);
-
-  double d12 = const Distance().as(LengthUnit.Meter, LatLng(lat1, lng1), LatLng((n2['lat'] as num).toDouble(), (n2['lng'] as num).toDouble()));
-  double dt12 = t2 - t1;
-  double calcSpeed = dt12 > 0 ? (d12 / dt12) : v;
-
-  return TdoaResult(
-    location: LatLng(finalLat, finalLng),
-    depthMeters: 0.0,
-    waveSpeedMps: calcSpeed,
-    is3D: false,
-  );
-}
-
+// The single-shot TDOA calculator (fixed 3500 m/s for every phase, required
+// readings.length >= 3 globally before doing anything, recomputed from
+// scratch and discarded its buffer every time) used to live here. Removed:
+// it couldn't produce any estimate below 3 nodes (the spec's 1- and 2-node
+// methods need to work too), ignored the P/S phase and azimuth/6C data the
+// new node schema provides, and never refined an existing estimate as more
+// nodes reported the same event. See pipeline/hypocentre_estimator.dart,
+// pipeline/association_gate.dart and pipeline/seismic_event.dart, run
+// inside the hub math isolate (pipeline/hub_isolate_entry.dart) and driven
+// from HubScreen via services/hub_hypocentre_service.dart.
 // ----------------------------------------------------------------------
 // REACTIVE TELEMETRY STATE (DECOUPLED FROM UI)
 // ----------------------------------------------------------------------
 class TelemetryState {
   final List<double> networkPeakWaveform = List.filled(60, 0.0);
   final Map<String, List<double>> nodeWaveforms = {};
-  
   int headIndex = 0;
 
   void updateWaves(Map<String, double> liveData, double peakMagnitude, Set<String> activeIds) {
@@ -299,7 +168,6 @@ class TelemetryState {
     }
     
     nodeWaveforms.removeWhere((key, _) => !activeIds.contains(key));
-    
     headIndex = (headIndex + 1) % 60; 
   }
 }
@@ -323,7 +191,6 @@ void main() async {
       } else {
         options = DefaultFirebaseOptions.web; 
       }
-      
       await Firebase.initializeApp(options: options);
     }
   } catch (e) {
@@ -357,8 +224,10 @@ class RoleSelectionScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        child: Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 20,
+          runSpacing: 20,
           children: [
             ElevatedButton.icon(
               icon: const Icon(Icons.phone_android),
@@ -410,10 +279,12 @@ class _HubLoginScreenState extends State<HubLoginScreen> {
       if (!mounted) return;
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HubScreen()));
     } on FirebaseAuthException catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(e.message ?? "Authentication failed", style: const TextStyle(color: Colors.white)),
-        backgroundColor: Colors.redAccent,
-      ));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.message ?? "Authentication failed", style: const TextStyle(color: Colors.white)),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -485,27 +356,33 @@ class NodeScreen extends StatefulWidget {
 }
 
 class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
-  late final String nodeID; 
+  late final String nodeID;
   late DatabaseReference _database;
   bool _isStreaming = false;
-  bool _isDisabled = false; 
-  final DisturbanceDetector _detector = DisturbanceDetector();
+  bool _isDisabled = false;
+  late final SensorPollingService _pollingService;
+  late final ClockSyncService _clockSync;
   double _calibrationProgress = 0.0;
-  
-  LatLng _currentLocation = const LatLng(17.9846, -76.9714);
+  bool _isCalibrating = true;
 
+  LatLng _currentLocation = const LatLng(17.9846, -76.9714);
   Timer? _liveWaveTimer;
   double _currentWaveMagnitude = 0.0;
 
-  StreamSubscription? _accelSub; 
+  SurfaceType _surfaceType = SurfaceType.unknown;
+  ChannelDominanceState? _lastChannelState;
+  bool _showThrottleBanner = false;
+
   StreamSubscription? _calibSub;
   StreamSubscription? _waveSub;
-  StreamSubscription? _distSub;
+  StreamSubscription? _triggerSub;
+  StreamSubscription? _nodeStatusSub;
   StreamSubscription<Position>? _positionSub;
-  StreamSubscription? _sensitivitySub; 
+  StreamSubscription? _sensitivitySub;
   StreamSubscription? _hpfSub;
   StreamSubscription? _statusSub;
-  StreamSubscription? _threeAxisSub; 
+  StreamSubscription? _surfaceOverrideSub;
+  StreamSubscription? _declinationSub;
 
   @override
   void initState() {
@@ -513,27 +390,31 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     nodeID = 'node_${math.Random().nextInt(999999)}';
     _database = FirebaseDatabase.instance.ref('sensor_network/$nodeID');
+    _clockSync = ClockSyncService(nodeID);
+    _pollingService = SensorPollingService(hpfAlpha: 0.9, sensitivityMultiplier: 1.0);
 
     FirebaseDatabase.instance.ref('nodes_presence/$nodeID').onDisconnect().remove();
 
     Future.microtask(() async {
       try {
         await FirebaseAuth.instance.signInAnonymously();
-        _registerPresence();
+        if (mounted) _registerPresence();
       } catch (error) {
         debugPrint("Node Auth Failed: $error");
       }
+      await _pollingService.start();
+      unawaited(_clockSync.start());
+      if (mounted) _maybePromptThrottleMitigation();
     });
-    
+
     if (kIsWeb || defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS) {
       _initGPS();
     }
 
     _sensitivitySub = FirebaseDatabase.instance.ref('node_settings/$nodeID/sensitivity').onValue.listen((event) {
       if (event.snapshot.value != null && mounted) {
-        setState(() {
-          _detector.sensitivityMultiplier = (event.snapshot.value as num).toDouble();
-        });
+        _pollingService.updateSensitivity((event.snapshot.value as num).toDouble());
+        setState(() {});
       }
     });
 
@@ -550,63 +431,93 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
 
     _hpfSub = FirebaseDatabase.instance.ref('global_settings/hpf_alpha').onValue.listen((event) {
       if (event.snapshot.value != null && mounted) {
-        setState(() {
-          _detector.hpfAlpha = (event.snapshot.value as num).toDouble();
-        });
+        _pollingService.updateHpfAlpha((event.snapshot.value as num).toDouble());
       }
     });
 
-    _threeAxisSub = FirebaseDatabase.instance.ref('global_settings/enable_3_axis').onValue.listen((event) {
+    // Fix #1: lets a hub operator correct the automatic hard/soft surface
+    // classifier for this node ('unknown' = trust the automatic heuristic).
+    _surfaceOverrideSub =
+        FirebaseDatabase.instance.ref('node_settings/$nodeID/surface_override').onValue.listen((event) {
+      if (mounted) {
+        final raw = event.snapshot.value?.toString() ?? 'unknown';
+        final type = SurfaceType.values.firstWhere((s) => s.name == raw, orElse: () => SurfaceType.unknown);
+        _pollingService.updateManualSurfaceOverride(type);
+      }
+    });
+
+    // A single region-wide declination constant, not a per-node World
+    // Magnetic Model - see CompassOrientation / ARCHITECTURE.md.
+    _declinationSub =
+        FirebaseDatabase.instance.ref('global_settings/magnetic_declination_deg').onValue.listen((event) {
       if (event.snapshot.value != null && mounted) {
+        _pollingService.updateDeclination((event.snapshot.value as num).toDouble());
+      }
+    });
+
+    _calibSub = _pollingService.onCalibrationProgress.listen((progress) {
+      if (mounted) {
         setState(() {
-          _detector.enable3Axis = (event.snapshot.value == true);
+          _calibrationProgress = progress;
+          _isCalibrating = progress < 1.0;
         });
       }
     });
 
-    _accelSub = userAccelerometerEventStream(
-      samplingPeriod: const Duration(milliseconds: 20)
-    ).listen((event) {
-      if (_isStreaming && !_isDisabled) {
-        _detector.processAccelerometerData(event.x, event.y, event.z);
+    _waveSub = _pollingService.onLiveWave.listen((mag) {
+      if (mounted) _currentWaveMagnitude = mag;
+    });
+
+    _nodeStatusSub = _pollingService.onStatusChanged.listen((NodeStatusMsg status) {
+      if (mounted) {
+        setState(() {
+          _surfaceType = status.surfaceType;
+          if (status.lastChannelState != null) _lastChannelState = status.lastChannelState;
+        });
       }
     });
 
-    _calibSub = _detector.onCalibrationProgress.listen((progress) {
-      if (mounted) setState(() => _calibrationProgress = progress);
-    });
+    _triggerSub = _pollingService.onTriggerDetected.listen((TriggerDetectedMsg trigger) {
+      if (_isStreaming && !_isDisabled && mounted) {
+        final correctedUs = _clockSync.correctedMicros(trigger.deviceLocalArrivalTimeUs);
+        final observation = TriggerObservation(
+          nodeId: nodeID,
+          latitude: _currentLocation.latitude,
+          longitude: _currentLocation.longitude,
+          arrivalTimeUs: correctedUs,
+          phase: trigger.phase,
+          amplitude: trigger.amplitude,
+          azimuthDegrees: trigger.azimuthDegrees,
+          azimuthUncertaintyDegrees: trigger.azimuthUncertaintyDegrees,
+          apparentVelocityMps: trigger.apparentVelocityMps,
+          sMinusPSeconds: trigger.sMinusPSeconds,
+          channelState: trigger.channelState,
+          accelerometerSaturated: trigger.accelerometerSaturated,
+          surfaceType: trigger.surfaceType,
+          noiseFloorAtTrigger: trigger.noiseFloorAtTrigger,
+        );
 
-    _waveSub = _detector.onLiveWave.listen((mag) => _currentWaveMagnitude = mag);
-
-    _distSub = _detector.onDisturbanceDetected.listen((result) {
-      if (_isStreaming && !_isDisabled) {
-        _database.set({
-          'node_id': nodeID,
-          'event_type': 'disturbance',
-          'angle': result.angleDegrees,
-          'speed_mps': result.estimatedSpeedMps, 
-          'reset_time_ms': result.resetTime.inMilliseconds,
-          'timestamp_us': result.preciseTimestampUs,
-          'lat': _currentLocation.latitude,
-          'lng': _currentLocation.longitude,
-          'is_3d': result.used3Axis,
+        setState(() {
+          _lastChannelState = trigger.channelState;
+          _surfaceType = trigger.surfaceType;
         });
 
+        _database.set(observation.toJson());
         FirebaseDatabase.instance.ref('telemetry_history').push().set({
-          'node_id': nodeID,
-          'timestamp_us': result.preciseTimestampUs,
+          ...observation.toJson(),
           'date_string': DateTime.now().toIso8601String(),
-          'angle': result.angleDegrees,
-          'speed_mps': result.estimatedSpeedMps,
-          'lat': _currentLocation.latitude,
-          'lng': _currentLocation.longitude,
-          'is_3d': result.used3Axis,
         });
       }
     });
   }
 
+  Future<void> _maybePromptThrottleMitigation() async {
+    final likely = await ThrottleMitigationService.isLikelyThrottled();
+    if (mounted) setState(() => _showThrottleBanner = likely);
+  }
+
   void _registerPresence() {
+    if (!mounted) return;
     final presenceRef = FirebaseDatabase.instance.ref('nodes_presence/$nodeID');
     presenceRef.set({
       'lat': _currentLocation.latitude,
@@ -618,10 +529,10 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
-      _accelSub?.pause();
+      _pollingService.pause();
       _liveWaveTimer?.cancel();
     } else if (state == AppLifecycleState.resumed) {
-      _accelSub?.resume();
+      _pollingService.resume();
       if (_isStreaming && !_isDisabled) {
         _startLiveWaveTimer();
       }
@@ -665,22 +576,26 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
     } catch (_) {}
 
     _liveWaveTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      liveRef.set({
-        'mag': _currentWaveMagnitude,
-        'ts': DateTime.now().millisecondsSinceEpoch,
-      });
+      if (mounted) {
+        liveRef.set({
+          'mag': _currentWaveMagnitude,
+          'ts': DateTime.now().millisecondsSinceEpoch,
+        });
+      }
     });
   }
 
   void _toggleStreaming(bool val) {
     if (_isDisabled && val) return;
+    if (!mounted) return;
 
     setState(() {
       _isStreaming = val;
       final liveRef = FirebaseDatabase.instance.ref('live_waves/$nodeID');
       
       if (_isStreaming) {
-        _detector.forceRecalibration();
+        _pollingService.forceRecalibration();
+        _isCalibrating = true;
         _startLiveWaveTimer();
         _registerPresence();
       } else {
@@ -696,31 +611,45 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    
     _positionSub?.cancel();
     _sensitivitySub?.cancel();
     _hpfSub?.cancel();
     _statusSub?.cancel();
-    _threeAxisSub?.cancel();
-    FirebaseDatabase.instance.ref('nodes_presence/$nodeID').remove();
+    _surfaceOverrideSub?.cancel();
+    _declinationSub?.cancel();
+    _calibSub?.cancel();
+    _waveSub?.cancel();
+    _triggerSub?.cancel();
+    _nodeStatusSub?.cancel();
     _liveWaveTimer?.cancel();
+
+    _positionSub = null;
+    _sensitivitySub = null;
+    _hpfSub = null;
+    _statusSub = null;
+    _surfaceOverrideSub = null;
+    _declinationSub = null;
+    _calibSub = null;
+    _waveSub = null;
+    _triggerSub = null;
+    _nodeStatusSub = null;
+    _liveWaveTimer = null;
+
+    FirebaseDatabase.instance.ref('nodes_presence/$nodeID').remove();
     final liveRef = FirebaseDatabase.instance.ref('live_waves/$nodeID');
     try {
       liveRef.onDisconnect().cancel();
     } catch (_) {}
     liveRef.remove();
-    
-    _accelSub?.cancel();
-    _calibSub?.cancel();
-    _waveSub?.cancel();
-    _distSub?.cancel();
-    _detector.dispose();
+
+    _clockSync.dispose();
+    _pollingService.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    bool isCalibrating = _detector.state == DetectorState.calibrating;
-
     return Scaffold(
       appBar: AppBar(title: Text('Node Tuner ($nodeID)')),
       body: SingleChildScrollView(
@@ -732,7 +661,32 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
               style: const TextStyle(color: Colors.greenAccent),
             ),
             const SizedBox(height: 20),
-            
+
+            if (_showThrottleBanner)
+              Card(
+                color: Colors.amber.withValues(alpha: 0.15),
+                child: Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Column(
+                    children: [
+                      const Text(
+                        "Background battery optimization may throttle sensor sampling during long sessions.",
+                        style: TextStyle(color: Colors.amberAccent),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 8),
+                      ElevatedButton(
+                        onPressed: () async {
+                          await ThrottleMitigationService.requestMitigation();
+                          _maybePromptThrottleMitigation();
+                        },
+                        child: const Text('Fix in Settings'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
             if (_isDisabled)
               const Padding(
                 padding: EdgeInsets.only(bottom: 20.0),
@@ -742,7 +696,7 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
                 ),
               ),
 
-            if (isCalibrating && _isStreaming) ...[
+            if (_isCalibrating && _isStreaming) ...[
               LinearProgressIndicator(value: _calibrationProgress),
               const SizedBox(height: 10),
               const Text("Learning Ambient Noise..."),
@@ -755,9 +709,13 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
             ],
             const SizedBox(height: 40),
             
-            Text("Remote Sensitivity: ${_detector.sensitivityMultiplier.toStringAsFixed(2)}x", style: const TextStyle(color: Colors.grey)),
-            if (_detector.enable3Axis)
-               const Text("3-Axis Polarization: ACTIVE", style: TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold)),
+            Text("Remote Sensitivity: ${_pollingService.sensitivityMultiplier.toStringAsFixed(2)}x", style: const TextStyle(color: Colors.grey)),
+            const SizedBox(height: 8),
+            Text(
+              "Surface: ${_surfaceType.name}  •  Channels: ${_lastChannelState == null ? 'accelerometer only so far' : _lastChannelState!.name}",
+              style: const TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+            ),
             
             const SizedBox(height: 40),
             SwitchListTile(
@@ -803,9 +761,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
   late final DatabaseReference _liveRef;
 
   late AnimationController _waveAnimationController;
-  
   final TelemetryState _telemetryState = TelemetryState();
-
   final Map<String, Map<String, dynamic>> _nodeLatestEvents = {};
   
   final Map<String, LatLng> _activeNodes = {};
@@ -814,11 +770,8 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
   final Map<String, bool> _disabledNodes = {}; 
 
   late final String _hubId;
-
-  final List<Map<String, dynamic>> _recentReadings = [];
   
   LatLng _hubLocation = const LatLng(17.9846, -76.9714);
-  
   String _currentMapStyle = 'dataviz-dark';
   String _tectonicResolution = 'low'; 
   
@@ -826,18 +779,22 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
   bool _isLoadingGeoJson = false;
   List<Polyline> _tectonicLines = [];
   
-  // MapTiler variables
   bool _isMapMenuExpanded = false;
   final String mapTilerKey = '8e2ryGtHdAUEGhbdshZS';
-
   double _globalHpfAlpha = 0.9;
-  bool _globalEnable3Axis = false; 
+  double _globalDeclinationDeg = 0.0;
 
-  final List<MapItemData> _epicenterDataList = [];
+  // Keyed by event id rather than appended-to, so an epicenter marker
+  // refines in place as more nodes associate instead of spawning a new pin
+  // every time the estimate updates.
+  final Map<String, MapItemData> _epicenterMarkers = {};
+  final Map<String, HypocentreEstimate> _activeEstimates = {};
   List<Marker> _cachedMarkers = [];
   
   final MapController _mapController = MapController();
   bool _isMapReady = false;
+
+  late final HubHypocentreService _hypocentreService;
 
   late final int _hubBootTimeUs;
   StreamSubscription? _networkAddSub;
@@ -848,29 +805,43 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
   StreamSubscription? _hubsPresenceSub;
   StreamSubscription? _nodeSettingsSub;
   StreamSubscription? _hpfSettingsSub;
-  StreamSubscription? _threeAxisSettingsSub;
+  StreamSubscription? _declinationSettingsSub;
+  StreamSubscription? _estimateSub;
+  StreamSubscription? _eventExpiredSub;
 
   @override
-void initState() {
-  super.initState();
-  WidgetsBinding.instance.addObserver(this);
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
-  _waveAnimationController = AnimationController(
-    vsync: this, 
-    duration: const Duration(seconds: 1)
-  )..repeat();
+    _hypocentreService = HubHypocentreService();
+    unawaited(_hypocentreService.start());
+    _estimateSub = _hypocentreService.onEstimateUpdate.listen(_handleEstimateUpdate);
+    _eventExpiredSub = _hypocentreService.onEventExpired.listen((eventId) {
+      if (mounted) {
+        setState(() {
+          _epicenterMarkers.remove(eventId);
+          _activeEstimates.remove(eventId);
+          _rebuildCachedMarkers();
+        });
+      }
+    });
 
-  final currentUser = FirebaseAuth.instance.currentUser;
-  _hubId = currentUser != null 
-      ? 'hub_${currentUser.uid.substring(0, 10)}' 
-      : 'hub_${math.Random().nextInt(999999)}';
+    _waveAnimationController = AnimationController(
+      vsync: this, 
+      duration: const Duration(seconds: 1)
+    )..repeat();
 
-  _networkRef = FirebaseDatabase.instance.ref('sensor_network');
-  _liveRef = FirebaseDatabase.instance.ref('live_waves');
-  
-  _hubBootTimeUs = DateTime.now().millisecondsSinceEpoch * 1000;
+    final currentUser = FirebaseAuth.instance.currentUser;
+    _hubId = currentUser != null 
+        ? 'hub_${currentUser.uid.substring(0, 10)}' 
+        : 'hub_${math.Random().nextInt(999999)}';
 
-  FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId').onDisconnect().remove();
+    _networkRef = FirebaseDatabase.instance.ref('sensor_network');
+    _liveRef = FirebaseDatabase.instance.ref('live_waves');
+    _hubBootTimeUs = DateTime.now().millisecondsSinceEpoch * 1000;
+
+    FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId').onDisconnect().remove();
     
     if (kIsWeb || defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS) {
       _initHubGPS();
@@ -886,14 +857,11 @@ void initState() {
       _networkAddSub?.pause();
       _networkChangeSub?.pause();
       _liveSub?.pause();
-      
       FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId').remove();
-      
     } else if (state == AppLifecycleState.resumed) {
       _networkAddSub?.resume();
       _networkChangeSub?.resume();
       _liveSub?.resume();
-      
       FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId').set({
         'lat': _hubLocation.latitude,
         'lng': _hubLocation.longitude,
@@ -905,6 +873,7 @@ void initState() {
   List<TectonicLineData> _masterTectonicData = [];
 
   Future<void> _reloadTectonicData() async {
+    if (!mounted) return;
     setState(() {
       _isLoadingGeoJson = true;
       _tectonicLines.clear(); 
@@ -926,7 +895,7 @@ void initState() {
         }
       }
 
-      if (_isMapReady) {
+      if (_isMapReady && mounted) {
         _updateVisibleLines(_mapController.camera);
       }
     } catch (e) {
@@ -937,7 +906,7 @@ void initState() {
   }
 
   void _updateVisibleLines(MapCamera camera) {
-    if (!_isTectonicOverlayActive || _masterTectonicData.isEmpty) return;
+    if (!_isTectonicOverlayActive || _masterTectonicData.isEmpty || !mounted) return;
 
     final bounds = camera.visibleBounds;
     final List<Polyline> visibleLines = [];
@@ -951,16 +920,23 @@ void initState() {
       }
     }
 
-    setState(() => _tectonicLines = visibleLines);
+    if (mounted) setState(() => _tectonicLines = visibleLines);
   }
 
   Future<void> _toggleTectonicGeoJson(bool isActive) async {
+    if (!mounted) return;
     setState(() => _isTectonicOverlayActive = isActive);
-    if (!isActive) return;
+    if (!isActive) {
+      setState(() {
+        _tectonicLines.clear();
+      });
+      return;
+    }
     _reloadTectonicData();
   }
 
   void _rebuildCachedMarkers() {
+    if (!mounted) return;
     _cachedMarkers = _buildAllMarkers();
   }
 
@@ -1072,11 +1048,12 @@ void initState() {
       }
     });
 
-    _threeAxisSettingsSub = FirebaseDatabase.instance.ref('global_settings/enable_3_axis').onValue.listen((event) {
+    _declinationSettingsSub =
+        FirebaseDatabase.instance.ref('global_settings/magnetic_declination_deg').onValue.listen((event) {
       if (!mounted) return;
       if (event.snapshot.value != null) {
         setState(() {
-          _globalEnable3Axis = (event.snapshot.value == true);
+          _globalDeclinationDeg = (event.snapshot.value as num).toDouble();
         });
       }
     });
@@ -1145,7 +1122,7 @@ void initState() {
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
                   onPressed: () {
                     Navigator.of(dialogContext).pop();
-                    _showConfirmationDialog(context, selectedRange);
+                    if (mounted) _showConfirmationDialog(context, selectedRange);
                   },
                   child: const Text("PROCEED", style: TextStyle(color: Colors.white)),
                 ),
@@ -1159,10 +1136,9 @@ void initState() {
 
   Future<void> _purgeInactiveDevices() async {
     final int now = DateTime.now().millisecondsSinceEpoch;
-    const int timeoutMs = 60000; // 60 seconds of inactivity
+    const int timeoutMs = 60000; 
 
     try {
-      // 1. Clean inactive nodes
       final nodesSnap = await FirebaseDatabase.instance.ref('nodes_presence').get();
       if (nodesSnap.exists && nodesSnap.value != null) {
         final mapVal = nodesSnap.value;
@@ -1179,13 +1155,12 @@ void initState() {
         }
       }
 
-      // 2. Clean inactive hubs (excluding this current hub)
       final hubsSnap = await FirebaseDatabase.instance.ref('diagnostic_hubs').get();
       if (hubsSnap.exists && hubsSnap.value != null) {
         final mapVal = hubsSnap.value;
         if (mapVal is Map) {
           for (var key in mapVal.keys) {
-            if (key.toString() == _hubId) continue; // Always keep ourselves active
+            if (key.toString() == _hubId) continue; 
             
             final hubData = mapVal[key];
             if (hubData is Map && hubData['timestamp'] != null) {
@@ -1198,13 +1173,12 @@ void initState() {
         }
       }
 
-      // 3. Clear old epicenters from the UI
-      setState(() {
-        _epicenterDataList.clear();
-        _rebuildCachedMarkers();
-      });
-
       if (mounted) {
+        setState(() {
+          _epicenterMarkers.clear();
+          _activeEstimates.clear();
+          _rebuildCachedMarkers();
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text("Inactive devices safely removed from the network."),
@@ -1318,6 +1292,7 @@ void initState() {
     _networkChangeSub = _networkRef.onChildChanged.listen((event) => _handleIncomingNodeData(event.snapshot));
 
     _liveSub = _liveRef.onValue.listen((event) {
+      if (!mounted) return;
       final val = event.snapshot.value;
       Map rawData = {};
       
@@ -1366,52 +1341,45 @@ void initState() {
     setState(() {
       String nodeId = map['node_id'] ?? 'unknown';
       _nodeLatestEvents[nodeId] = map;
-      _processDisturbanceForMap(map);
     });
+    // Stages 3-5 (association gate, method selection, recursive estimate,
+    // feedback) run in the hub math isolate; no node-count gate here - the
+    // decision table has a method for one node too, just a weaker one.
+    _hypocentreService.ingestObservation(map);
   }
 
-  void _processDisturbanceForMap(Map<String, dynamic> newReading) {
-    if (_activeNodes.length < 3) return; 
-
-    String nodeId = newReading['node_id'] ?? 'unknown';
-    int nowUs = DateTime.now().microsecondsSinceEpoch;
-
-    _recentReadings.removeWhere((r) => (nowUs - (r['timestamp_us'] as num).toInt()) > 5000000);
-    _recentReadings.removeWhere((r) => r['node_id'] == nodeId);
-    _recentReadings.add(newReading);
-
-    if (_recentReadings.length >= 3) {
-      _recentReadings.sort((a, b) => (a['timestamp_us'] as num).compareTo(b['timestamp_us'] as num));
-
-      TdoaResult? result = _calculateTdoaEpicenter(_recentReadings);
-      if (result != null) {
-        String label = result.is3D ? "3D TDOA Hypocenter" : "2D TDOA Epicenter";
-        _plotEpicenter(result.location, label, result.waveSpeedMps, result.depthMeters, result.is3D);
-        _recentReadings.clear(); 
-      }
-    }
+  String _describeEstimate(EstimateUpdateMsg u) {
+    final depthStr = u.depthMeters != null
+        ? "Depth: ${(u.depthMeters! / 1000.0).toStringAsFixed(1)} km (±${(u.depthUncertaintyMeters / 1000.0).toStringAsFixed(1)} km)"
+        : "Depth: unresolved at this node count";
+    final maturityStr =
+        u.maturity == MethodMaturity.exotic ? "Research-level method - treat with caution" : "Standard method";
+    return "${u.methodLabel}\n$maturityStr\n"
+        "Lat: ${u.latitude.toStringAsFixed(4)}, Lng: ${u.longitude.toStringAsFixed(4)}\n"
+        "$depthStr\n"
+        "±${(u.horizontalUncertaintyMeters / 1000.0).toStringAsFixed(1)} km horizontal\n"
+        "${u.associatedNodeIds.length} node(s) associated";
   }
 
-  void _plotEpicenter(LatLng location, String label, double calculatedSpeed, double depthMeters, bool is3D) {
-    String depthStr = is3D ? "\nDepth: ${(depthMeters / 1000.0).toStringAsFixed(2)} km" : "";
-    _epicenterDataList.add(MapItemData(
-      id: 'epi_${DateTime.now().millisecondsSinceEpoch}_${math.Random().nextInt(1000)}',
-      loc: location,
-      type: MapItemType.epicenter,
-      tooltipMessage: "$label\nLat: ${location.latitude.toStringAsFixed(4)}, Lng: ${location.longitude.toStringAsFixed(4)}$depthStr\nCalculated Speed: ${calculatedSpeed.toStringAsFixed(2)} m/s",
-    ));
-    
-    if (_epicenterDataList.length > 50) {
-      _epicenterDataList.removeAt(0);
-    }
-    
+  void _handleEstimateUpdate(EstimateUpdateMsg update) {
+    if (!mounted) return;
+    _activeEstimates[update.eventId] = update.toEstimate();
+
     setState(() {
+      _epicenterMarkers[update.eventId] = MapItemData(
+        id: update.eventId,
+        loc: LatLng(update.latitude, update.longitude),
+        type: MapItemType.epicenter,
+        tooltipMessage: _describeEstimate(update),
+      );
       _rebuildCachedMarkers();
     });
-    
-    if (_isMapReady) {
+
+    // Only recentre the map when a *new* event appears - re-centring on
+    // every refinement of an event already on screen would be jarring.
+    if (update.isNewEvent && _isMapReady) {
       try {
-        _mapController.move(location, 18.0);
+        _mapController.move(LatLng(update.latitude, update.longitude), 18.0);
       } catch (e) {
         debugPrint("Failed to move MapController: $e");
       }
@@ -1439,7 +1407,7 @@ void initState() {
       ));
     });
 
-    rawItems.addAll(_epicenterDataList);
+    rawItems.addAll(_epicenterMarkers.values);
 
     Map<int, List<MapItemData>> grid = {}; 
 
@@ -1584,6 +1552,43 @@ void initState() {
                 },
               ),
               const SizedBox(height: 20),
+              const Text("Magnetic Declination (deg)", style: TextStyle(color: Colors.white70, fontSize: 14)),
+              const Text(
+                "Look up your region's declination once and set it here - a single regional constant, not a per-node model. See ARCHITECTURE.md.",
+                style: TextStyle(color: Colors.grey, fontSize: 11),
+              ),
+              StatefulBuilder(
+                builder: (context, setModalState) {
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: Slider(
+                          value: _globalDeclinationDeg,
+                          min: -30.0,
+                          max: 30.0,
+                          divisions: 120,
+                          label: _globalDeclinationDeg.toStringAsFixed(1),
+                          activeColor: Colors.purpleAccent,
+                          onChanged: (val) {
+                            setModalState(() => _globalDeclinationDeg = val);
+                            setState(() => _globalDeclinationDeg = val);
+                            FirebaseDatabase.instance.ref('global_settings/magnetic_declination_deg').set(val);
+                          },
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          setModalState(() => _globalDeclinationDeg = 0.0);
+                          setState(() => _globalDeclinationDeg = 0.0);
+                          FirebaseDatabase.instance.ref('global_settings/magnetic_declination_deg').set(0.0);
+                        },
+                        child: const Text("Reset", style: TextStyle(color: Colors.redAccent)),
+                      ),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 20),
               ElevatedButton.icon(
                 icon: const Icon(Icons.tune),
                 label: const Text("Node sensitivity..."),
@@ -1654,6 +1659,27 @@ void initState() {
                                 ),
                               ],
                             ),
+                            Row(
+                              children: [
+                                const Text("Surface:", style: TextStyle(fontSize: 11, color: Colors.grey)),
+                                const SizedBox(width: 8),
+                                for (final option in const ['unknown', 'hard', 'soft'])
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 6.0),
+                                    child: OutlinedButton(
+                                      style: OutlinedButton.styleFrom(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                        minimumSize: Size.zero,
+                                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                      ),
+                                      onPressed: () {
+                                        FirebaseDatabase.instance.ref('node_settings/$nodeId/surface_override').set(option);
+                                      },
+                                      child: Text(option == 'unknown' ? 'Auto' : option, style: const TextStyle(fontSize: 11)),
+                                    ),
+                                  ),
+                              ],
+                            ),
                           ],
                         );
                       }
@@ -1675,16 +1701,41 @@ void initState() {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    
     _networkAddSub?.cancel();
     _networkChangeSub?.cancel();
     _liveSub?.cancel();
-    _waveAnimationController.dispose();
     _hubPositionSub?.cancel();
     _nodesPresenceSub?.cancel();
     _hubsPresenceSub?.cancel();
     _nodeSettingsSub?.cancel();
     _hpfSettingsSub?.cancel();
-    _threeAxisSettingsSub?.cancel();
+    _declinationSettingsSub?.cancel();
+    _estimateSub?.cancel();
+    _eventExpiredSub?.cancel();
+    
+    _networkAddSub = null;
+    _networkChangeSub = null;
+    _liveSub = null;
+    _hubPositionSub = null;
+    _nodesPresenceSub = null;
+    _hubsPresenceSub = null;
+    _nodeSettingsSub = null;
+    _hpfSettingsSub = null;
+    _declinationSettingsSub = null;
+    _estimateSub = null;
+    _eventExpiredSub = null;
+
+    _waveAnimationController.dispose();
+    _hypocentreService.dispose();
+    
+    // Explicitly clear map data
+    _tectonicLines.clear();
+    _cachedMarkers.clear();
+    _epicenterMarkers.clear();
+    _activeEstimates.clear();
+    _masterTectonicData.clear();
+
     FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId').remove();
     super.dispose();
   }
@@ -1760,22 +1811,46 @@ void initState() {
                         }
                       ),
                     ),
-                    const Divider(color: Colors.white24, height: 32),
-                    SwitchListTile(
-                      title: const Text("3-AXIS POLARIZATION MODE", style: TextStyle(fontWeight: FontWeight.bold)),
-                      subtitle: const Text("Resolves local directional ambiguity in sparse networks (< 3 nodes) via initial Z-axis polarity.", style: TextStyle(color: Colors.grey, fontSize: 12)),
-                      value: _globalEnable3Axis,
-                      activeThumbColor: Colors.amberAccent, 
-                      onChanged: (val) {
-                        FirebaseDatabase.instance.ref('global_settings/enable_3_axis').set(val);
-                      },
-                      contentPadding: EdgeInsets.zero,
-                    ),
                   ],
                 ),
               ),
             ),
             
+            const SizedBox(height: 24),
+            const Divider(color: Colors.white24),
+            const SizedBox(height: 16),
+
+            Text("${_activeEstimates.length} ACTIVE EVENT(S)", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: 2.0)),
+            const SizedBox(height: 16),
+            if (_activeEstimates.isEmpty)
+              const Center(child: Text("No events associated yet.", style: TextStyle(color: Colors.grey))),
+            ..._activeEstimates.entries.map((entry) {
+              final est = entry.value;
+              final depthStr = est.depthMeters != null
+                  ? "${(est.depthMeters! / 1000.0).toStringAsFixed(1)} km deep"
+                  : "depth unresolved";
+              return Card(
+                margin: const EdgeInsets.only(bottom: 8.0),
+                color: const Color(0xFF16161F),
+                shape: RoundedRectangleBorder(
+                  side: BorderSide(color: est.maturity == MethodMaturity.exotic ? Colors.amberAccent : Colors.white10),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ListTile(
+                  leading: const Icon(Icons.crisis_alert, color: Colors.redAccent),
+                  title: Text(est.methodLabel, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text(
+                    "${est.latitude.toStringAsFixed(4)}, ${est.longitude.toStringAsFixed(4)} - $depthStr\n"
+                    "${est.associatedNodeIds.length} node(s) - ±${(est.horizontalUncertaintyMeters / 1000.0).toStringAsFixed(1)} km",
+                  ),
+                  isThreeLine: true,
+                  trailing: est.maturity == MethodMaturity.exotic
+                      ? const Tooltip(message: "Research-level method", child: Icon(Icons.science, color: Colors.amberAccent))
+                      : null,
+                ),
+              );
+            }),
+
             const SizedBox(height: 24),
             const Divider(color: Colors.white24),
             const SizedBox(height: 16),
@@ -1796,117 +1871,130 @@ void initState() {
     final latestEvent = _nodeLatestEvents[nodeId];
     final location = _activeNodes[nodeId];
     
-    double angle = (latestEvent?['angle'] ?? 0.0).toDouble();
-    double localSpeed = (latestEvent?['speed_mps'] ?? 0.0).toDouble();
-    bool is3D = latestEvent?['is_3d'] == true;
+    final double? angle = (latestEvent?['azimuth_true_deg'] as num?)?.toDouble();
+    final double? apparentVelocity = (latestEvent?['apparent_velocity_mps'] as num?)?.toDouble();
+    final String channelState = latestEvent?['channel_state']?.toString() ?? 'accelerometerDominant';
+    final bool accelSaturated = latestEvent?['accel_saturated'] == true;
+    final String surfaceType = latestEvent?['surface_type']?.toString() ?? 'unknown';
+    bool bothChannels = accelSaturated || channelState == 'bothChannelsUsable';
     String latStr = location != null ? location.latitude.toStringAsFixed(4) : "Awaiting Lock";
     String lngStr = location != null ? location.longitude.toStringAsFixed(4) : "Awaiting Lock";
     
     bool hasEvent = latestEvent != null;
-    bool canCalculateSpeed = _activeNodes.length >= 3; 
     bool isDisabled = _disabledNodes[nodeId] ?? false;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 16.0),
       child: Padding(
         padding: const EdgeInsets.all(16.0),
-        child: Row(
-          children: [
-            Expanded(
-              flex: 2,
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            bool isNarrow = constraints.maxWidth < 400;
+            return Flex(
+              direction: isNarrow ? Axis.vertical : Axis.horizontal,
+              crossAxisAlignment: isNarrow ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: isNarrow ? double.infinity : constraints.maxWidth * 0.35,
+                  child: Column(
                     children: [
-                      Icon(Icons.circle, color: isDisabled ? Colors.redAccent : Colors.greenAccent, size: 12),
-                      const SizedBox(width: 4),
-                      Text(isDisabled ? "Disabled" : "Active", style: TextStyle(color: isDisabled ? Colors.redAccent : Colors.greenAccent, fontWeight: FontWeight.bold)),
-                      const Spacer(),
-                      Switch(
-                        value: !isDisabled,
-                        activeThumbColor: Colors.greenAccent,
-                        inactiveThumbColor: Colors.redAccent,
-                        onChanged: (val) {
-                          FirebaseDatabase.instance.ref('node_settings/$nodeId/is_disabled').set(!val);
-                        },
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.circle, color: isDisabled ? Colors.redAccent : Colors.greenAccent, size: 12),
+                          const SizedBox(width: 4),
+                          Text(isDisabled ? "Disabled" : "Active", style: TextStyle(color: isDisabled ? Colors.redAccent : Colors.greenAccent, fontWeight: FontWeight.bold)),
+                          const Spacer(),
+                          Switch(
+                            value: !isDisabled,
+                            activeThumbColor: Colors.greenAccent,
+                            inactiveThumbColor: Colors.redAccent,
+                            onChanged: (val) {
+                              FirebaseDatabase.instance.ref('node_settings/$nodeId/is_disabled').set(!val);
+                            },
+                          ),
+                        ],
                       ),
+                      const SizedBox(height: 8),
+                      Text(nodeId.toUpperCase(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
+                      const SizedBox(height: 4),
+                      Text("Lat: $latStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      Text("Lng: $lngStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      Text("Surface: $surfaceType", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      const SizedBox(height: 16),
+                      Transform.rotate(
+                        angle: -(angle ?? 0.0) * (math.pi / 180), 
+                        child: Icon(Icons.arrow_upward, size: 40, color: (hasEvent && angle != null) ? (bothChannels ? Colors.amberAccent : Colors.redAccent) : Colors.grey.shade800),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        (hasEvent && angle != null) ? "${angle.toStringAsFixed(1)}°" : "N/A", 
+                        style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: (hasEvent && angle != null) ? Colors.white : Colors.grey)
+                      ),
+                      if (hasEvent) 
+                         Text(bothChannels ? "(Gyroscope active)" : "(Accelerometer only)", style: const TextStyle(fontSize: 10, color: Colors.amberAccent)),
                     ],
                   ),
-                  const SizedBox(height: 8),
-                  Text(nodeId.toUpperCase(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
-                  const SizedBox(height: 4),
-                  Text("Lat: $latStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                  Text("Lng: $lngStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                  const SizedBox(height: 16),
-                  Transform.rotate(
-                    angle: -angle * (math.pi / 180), 
-                    child: Icon(Icons.arrow_upward, size: 40, color: hasEvent ? (is3D ? Colors.amberAccent : Colors.redAccent) : Colors.grey.shade800),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    hasEvent ? "${angle.toStringAsFixed(1)}°" : "N/A", 
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: hasEvent ? Colors.white : Colors.grey)
-                  ),
-                  if (hasEvent && is3D) 
-                     const Text("(3-Axis Resolved)", style: TextStyle(fontSize: 10, color: Colors.amberAccent)),
-                ],
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              flex: 5,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text("LIVE TELEMETRY STREAM", style: TextStyle(fontSize: 10, letterSpacing: 1.5, color: Colors.grey)),
-                  const SizedBox(height: 8),
-                  Container(
-                    height: 80,
-                    decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
-                    child: AnimatedBuilder(
-                      animation: _waveAnimationController,
-                      builder: (context, child) {
-                         final waveform = _telemetryState.nodeWaveforms[nodeId] ?? List.filled(60, 0.0);
-                         return CustomPaint(painter: LiveStreamPainter(waveform, _telemetryState.headIndex));
-                      }
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text("LATEST DISTURBANCE PROFILE", style: TextStyle(fontSize: 10, letterSpacing: 1.5, color: Colors.grey)),
-                  const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(4)),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                ),
+                if (!isNarrow) const SizedBox(width: 16),
+                if (isNarrow) const SizedBox(height: 24),
+                Expanded(
+                  flex: isNarrow ? 0 : 1,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text("LIVE TELEMETRY STREAM", style: TextStyle(fontSize: 10, letterSpacing: 1.5, color: Colors.grey)),
+                      const SizedBox(height: 8),
+                      Container(
+                        height: 80,
+                        decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
+                        child: AnimatedBuilder(
+                          animation: _waveAnimationController,
+                          builder: (context, child) {
+                             final waveform = _telemetryState.nodeWaveforms[nodeId] ?? List.filled(60, 0.0);
+                             return CustomPaint(painter: LiveStreamPainter(waveform, _telemetryState.headIndex));
+                          }
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      const Text("LATEST DISTURBANCE PROFILE", style: TextStyle(fontSize: 10, letterSpacing: 1.5, color: Colors.grey)),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(4)),
+                        child: Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          spacing: 16,
+                          runSpacing: 16,
                           children: [
-                            const Text("LOCAL ESTIMATE", style: TextStyle(fontSize: 10, color: Colors.grey)),
-                            const SizedBox(height: 4),
-                            Text(hasEvent ? "${localSpeed.toStringAsFixed(0)} m/s" : "STANDBY", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text("LOCAL VELOCITY (6C)", style: TextStyle(fontSize: 10, color: Colors.grey)),
+                                const SizedBox(height: 4),
+                                Text(apparentVelocity != null ? "${apparentVelocity.toStringAsFixed(0)} m/s" : (hasEvent ? "N/A" : "STANDBY"), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                              ],
+                            ),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text("CHANNEL STATE", style: TextStyle(fontSize: 10, color: Colors.grey)),
+                                const SizedBox(height: 4),
+                                Text(
+                                  !hasEvent ? "STANDBY" : (accelSaturated ? "Accel saturated" : (bothChannels ? "Both channels" : "Accelerometer only")), 
+                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: accelSaturated ? Colors.orangeAccent : Colors.white)
+                                ),
+                              ],
+                            )
                           ],
                         ),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text("TDOA SPEED", style: TextStyle(fontSize: 10, color: Colors.grey)),
-                            const SizedBox(height: 4),
-                            Text(
-                              canCalculateSpeed ? (hasEvent ? "Calculating..." : "STANDBY") : "Requires 3 Nodes", 
-                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: canCalculateSpeed ? Colors.white : Colors.amberAccent)
-                            ),
-                          ],
-                        )
-                      ],
-                    ),
-                  )
-                ],
-              ),
-            )
-          ],
+                      )
+                    ],
+                  ),
+                )
+              ],
+            );
+          }
         ),
       ),
     );
@@ -1922,6 +2010,7 @@ void initState() {
               initialCenter: _hubLocation,
               initialZoom: 16.0,
               onMapReady: () {
+                if (!mounted) return;
                 setState(() => _isMapReady = true);
                 if (_isTectonicOverlayActive) {
                   _updateVisibleLines(_mapController.camera);
@@ -1983,7 +2072,6 @@ void initState() {
           ),
         ),
 
-        // MapTiler Configuration Collapsible Menu
         Positioned(
           top: 16,
           right: 16,
@@ -2165,8 +2253,9 @@ void initState() {
                   final event = events[index];
                   final dateStr = event['date_string'] ?? '';
                   final nodeId = event['node_id'] ?? 'Unknown';
-                  final speed = (event['speed_mps'] as num?)?.toStringAsFixed(1) ?? 'N/A';
-                  final angle = (event['angle'] as num?)?.toStringAsFixed(1) ?? 'N/A';
+                  final speed = (event['apparent_velocity_mps'] as num?)?.toStringAsFixed(1) ?? 'N/A';
+                  final angle = (event['azimuth_true_deg'] as num?)?.toStringAsFixed(1) ?? 'N/A';
+                  final bool bothChannels = event['accel_saturated'] == true || event['channel_state'] == 'bothChannelsUsable';
                   
                   DateTime? dt = DateTime.tryParse(dateStr);
                   String timeFormatted = dt != null 
@@ -2185,11 +2274,11 @@ void initState() {
                       title: Text("Disturbance at ${nodeId.toUpperCase()}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueAccent)),
                       subtitle: Padding(
                         padding: const EdgeInsets.only(top: 4.0),
-                        child: Text("Time: $timeFormatted\nEst. Speed: $speed m/s  |  Angle: $angle°"),
+                        child: Text("Time: $timeFormatted\nLocal velocity: $speed m/s  |  Azimuth: $angle°"),
                       ),
-                      trailing: event['is_3d'] == true 
+                      trailing: bothChannels
                           ? const Tooltip(
-                              message: "3-Axis Resolved",
+                              message: "Both channels usable (gyroscope active)",
                               child: Icon(Icons.threed_rotation, color: Colors.amberAccent, size: 24),
                             ) 
                           : null,
