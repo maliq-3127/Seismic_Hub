@@ -37,6 +37,7 @@ dependencies:
   flutter_map: ^6.1.0      # High-performance native map rendering
   latlong2: ^0.9.0         # Geodesic math and coordinates
   geolocator: ^10.1.0      # Hardware GPS access
+  firebase_auth: ^5.7.0
 
 dev_dependencies:
   flutter_test:

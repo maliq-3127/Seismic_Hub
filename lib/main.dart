@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart'; 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // Added Auth
 import 'package:firebase_database/firebase_database.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -74,7 +75,8 @@ class RoleSelectionScreen extends StatelessWidget {
             ElevatedButton.icon(
               icon: const Icon(Icons.analytics),
               label: const Text('DIAGNOSTIC HUB'),
-              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HubScreen())),
+              // Changed routing to hit the Login Screen first
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HubLoginScreen())),
             ),
           ],
         ),
@@ -84,7 +86,98 @@ class RoleSelectionScreen extends StatelessWidget {
 }
 
 // ----------------------------------------------------------------------
-// 2. NODE SCREEN
+// 2. AUTHENTICATION SYSTEM
+// ----------------------------------------------------------------------
+class HubLoginScreen extends StatefulWidget {
+  const HubLoginScreen({super.key});
+  @override
+  State<HubLoginScreen> createState() => _HubLoginScreenState();
+}
+
+class _HubLoginScreenState extends State<HubLoginScreen> {
+  final _emailCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  bool _isLoading = false;
+
+  Future<void> _authenticate({required bool isLogin}) async {
+    if (_emailCtrl.text.isEmpty || _passCtrl.text.isEmpty) return;
+    
+    setState(() => _isLoading = true);
+    try {
+      if (isLogin) {
+        await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: _emailCtrl.text.trim(), 
+          password: _passCtrl.text
+        );
+      } else {
+        await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: _emailCtrl.text.trim(), 
+          password: _passCtrl.text
+        );
+      }
+      if (!mounted) return;
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HubScreen()));
+    } on FirebaseAuthException catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.message ?? "Authentication failed", style: const TextStyle(color: Colors.white)),
+        backgroundColor: Colors.redAccent,
+      ));
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Hub Authentication")),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.admin_panel_settings, size: 80, color: Colors.purpleAccent),
+              const SizedBox(height: 32),
+              TextField(
+                controller: _emailCtrl,
+                decoration: const InputDecoration(labelText: 'Email', border: OutlineInputBorder()),
+                keyboardType: TextInputType.emailAddress,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _passCtrl,
+                decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder()),
+                obscureText: true,
+              ),
+              const SizedBox(height: 32),
+              if (_isLoading)
+                const CircularProgressIndicator(color: Colors.purpleAccent)
+              else
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    TextButton(
+                      onPressed: () => _authenticate(isLogin: false),
+                      child: const Text("Register", style: TextStyle(color: Colors.grey)),
+                    ),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.purpleAccent, foregroundColor: Colors.white),
+                      onPressed: () => _authenticate(isLogin: true),
+                      child: const Text("Secure Login"),
+                    ),
+                  ],
+                )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------
+// 3. NODE SCREEN
 // ----------------------------------------------------------------------
 class NodeScreen extends StatefulWidget {
   const NodeScreen({super.key});
@@ -96,6 +189,7 @@ class _NodeScreenState extends State<NodeScreen> {
   late final String nodeID; 
   late DatabaseReference _database;
   bool _isStreaming = false;
+  bool _isDisabled = false; // Tracks if Hub has disabled this node
   final DisturbanceDetector _detector = DisturbanceDetector();
   double _calibrationProgress = 0.0;
   
@@ -111,12 +205,22 @@ class _NodeScreenState extends State<NodeScreen> {
   StreamSubscription<Position>? _positionSub;
   StreamSubscription? _sensitivitySub; 
   StreamSubscription? _hpfSub;
+  StreamSubscription? _statusSub; // Sub for disabled status
 
   @override
   void initState() {
     super.initState();
     nodeID = 'node_${math.Random().nextInt(999999)}';
     _database = FirebaseDatabase.instance.ref('sensor_network/$nodeID');
+
+    // Authenticate the node silently in the background
+    Future.microtask(() async {
+      try {
+        await FirebaseAuth.instance.signInAnonymously();
+      } catch (error) {
+        debugPrint("Node Auth Failed: $error");
+      }
+    });
     
     if (kIsWeb || defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS) {
       _initGPS();
@@ -130,7 +234,19 @@ class _NodeScreenState extends State<NodeScreen> {
       }
     });
 
-    // Listen to real-time high-pass filter changes from the Hub
+    // Listen for Disable Status from Hub
+    _statusSub = FirebaseDatabase.instance.ref('node_settings/$nodeID/is_disabled').onValue.listen((event) {
+      if (mounted) {
+        setState(() {
+          _isDisabled = (event.snapshot.value == true);
+          // Auto-kill the stream if disabled by Hub
+          if (_isDisabled && _isStreaming) {
+            _toggleStreaming(false);
+          }
+        });
+      }
+    });
+
     _hpfSub = FirebaseDatabase.instance.ref('global_settings/hpf_alpha').onValue.listen((event) {
       if (event.snapshot.value != null && mounted) {
         setState(() {
@@ -142,7 +258,7 @@ class _NodeScreenState extends State<NodeScreen> {
     _gyroSub = gyroscopeEventStream(
       samplingPeriod: const Duration(milliseconds: 20)
     ).listen((event) {
-      if (_isStreaming) _detector.processGyroscopeData(event.x, event.y);
+      if (_isStreaming && !_isDisabled) _detector.processGyroscopeData(event.x, event.y);
     });
 
     _calibSub = _detector.onCalibrationProgress.listen((progress) {
@@ -152,7 +268,7 @@ class _NodeScreenState extends State<NodeScreen> {
     _waveSub = _detector.onLiveWave.listen((mag) => _currentWaveMagnitude = mag);
 
     _distSub = _detector.onDisturbanceDetected.listen((result) {
-      if (_isStreaming) {
+      if (_isStreaming && !_isDisabled) {
         _database.set({
           'node_id': nodeID,
           'event_type': 'disturbance',
@@ -204,6 +320,8 @@ class _NodeScreenState extends State<NodeScreen> {
   }
 
   void _toggleStreaming(bool val) {
+    if (_isDisabled && val) return; // Prevent turning on if disabled
+
     setState(() {
       _isStreaming = val;
       final liveRef = FirebaseDatabase.instance.ref('live_waves/$nodeID');
@@ -236,6 +354,7 @@ class _NodeScreenState extends State<NodeScreen> {
     _positionSub?.cancel();
     _sensitivitySub?.cancel();
     _hpfSub?.cancel();
+    _statusSub?.cancel();
     FirebaseDatabase.instance.ref('nodes_presence/$nodeID').remove();
     _liveWaveTimer?.cancel();
     final liveRef = FirebaseDatabase.instance.ref('live_waves/$nodeID');
@@ -267,12 +386,27 @@ class _NodeScreenState extends State<NodeScreen> {
               style: const TextStyle(color: Colors.greenAccent),
             ),
             const SizedBox(height: 20),
+            
+            // Disabled Warning Message
+            if (_isDisabled)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 20.0),
+                child: Text(
+                  "This node has been disabled", 
+                  style: TextStyle(color: Colors.redAccent, fontSize: 18, fontWeight: FontWeight.bold)
+                ),
+              ),
+
             if (isCalibrating && _isStreaming) ...[
               LinearProgressIndicator(value: _calibrationProgress),
               const SizedBox(height: 10),
               const Text("Learning Ambient Noise..."),
             ] else ...[
-              Icon(Icons.radar, size: 60, color: _isStreaming ? Colors.greenAccent : Colors.grey),
+              Icon(
+                _isDisabled ? Icons.block : Icons.radar, 
+                size: 60, 
+                color: _isDisabled ? Colors.redAccent : (_isStreaming ? Colors.greenAccent : Colors.grey)
+              ),
             ],
             const SizedBox(height: 40),
             
@@ -283,7 +417,8 @@ class _NodeScreenState extends State<NodeScreen> {
               title: const Text('Transmit Telemetry'),
               value: _isStreaming,
               activeThumbColor: Colors.greenAccent, 
-              onChanged: _toggleStreaming,
+              // Nullify onChanged if disabled to prevent user from turning it on
+              onChanged: _isDisabled ? null : _toggleStreaming,
             ),
           ],
         ),
@@ -293,7 +428,7 @@ class _NodeScreenState extends State<NodeScreen> {
 }
 
 // ----------------------------------------------------------------------
-// 3. THE HUB
+// 4. THE HUB
 // ----------------------------------------------------------------------
 enum MapItemType { hub, node, epicenter }
 
@@ -328,6 +463,8 @@ class _HubScreenState extends State<HubScreen> {
   final Map<String, LatLng> _activeNodes = {};
   final Map<String, LatLng> _activeHubs = {};
   final Map<String, double> _nodeSensitivities = {}; 
+  final Map<String, bool> _disabledNodes = {}; // Tracks disabled state
+
   late final String _hubId;
 
   Map<String, dynamic>? _firstReadingInPair;
@@ -445,8 +582,15 @@ class _HubScreenState extends State<HubScreen> {
       if (val != null) {
         setState(() {
           val.forEach((key, value) {
-             if (value is Map && value['sensitivity'] != null) {
-                _nodeSensitivities[key.toString()] = (value['sensitivity'] as num).toDouble();
+             if (value is Map) {
+                if (value['sensitivity'] != null) {
+                  _nodeSensitivities[key.toString()] = (value['sensitivity'] as num).toDouble();
+                }
+                if (value['is_disabled'] != null) {
+                  _disabledNodes[key.toString()] = value['is_disabled'] == true;
+                } else {
+                  _disabledNodes[key.toString()] = false;
+                }
              }
           });
         });
@@ -601,14 +745,13 @@ class _HubScreenState extends State<HubScreen> {
     });
 
     _activeNodes.forEach((id, loc) {
-      if (_nodeWaveforms.containsKey(id)) {
-        rawItems.add(MapItemData(
-          id: id,
-          loc: loc,
-          type: MapItemType.node,
-          tooltipMessage: "Node: $id\nLat: ${loc.latitude.toStringAsFixed(4)}, Lng: ${loc.longitude.toStringAsFixed(4)}",
-        ));
-      }
+      // Show nodes on the map regardless of whether they have a waveform streaming
+      rawItems.add(MapItemData(
+        id: id,
+        loc: loc,
+        type: MapItemType.node,
+        tooltipMessage: "Node: $id\nLat: ${loc.latitude.toStringAsFixed(4)}, Lng: ${loc.longitude.toStringAsFixed(4)}",
+      ));
     });
 
     rawItems.addAll(_epicenterDataList);
@@ -663,9 +806,11 @@ class _HubScreenState extends State<HubScreen> {
         );
         break;
       case MapItemType.node:
+        // Adjust map icon color if disabled
+        bool isDisabled = _disabledNodes[data.id] ?? false;
         iconWidget = Tooltip(
           message: data.tooltipMessage,
-          child: const Icon(Icons.cell_tower, color: Colors.blueAccent, size: 35),
+          child: Icon(isDisabled ? Icons.cell_tower_outlined : Icons.cell_tower, color: isDisabled ? Colors.redAccent : Colors.blueAccent, size: 35),
         );
         break;
       case MapItemType.epicenter:
@@ -859,6 +1004,16 @@ class _HubScreenState extends State<HubScreen> {
         appBar: AppBar(
           title: const Text("DIAGNOSTIC HUB"),
           actions: [
+            // Sign Out Button
+            IconButton(
+              icon: const Icon(Icons.logout),
+              tooltip: 'Sign Out',
+              onPressed: () async {
+                await FirebaseAuth.instance.signOut();
+                if (!context.mounted) return;
+                Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const RoleSelectionScreen()));
+              },
+            ),
             IconButton(
               icon: const Icon(Icons.settings),
               tooltip: 'Settings',
@@ -916,10 +1071,10 @@ class _HubScreenState extends State<HubScreen> {
           
           Text("${_activeNodes.length} ACTIVE NODES", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: 2.0)),
           const SizedBox(height: 16),
-          if (_nodeWaveforms.isEmpty)
-            const Center(child: Text("Waiting for nodes to transmit telemetry...", style: TextStyle(color: Colors.grey))),
+          if (_activeNodes.isEmpty)
+            const Center(child: Text("Waiting for nodes to connect...", style: TextStyle(color: Colors.grey))),
           
-          ..._nodeWaveforms.keys.map((nodeId) => _buildNodeCard(nodeId)),
+          ..._activeNodes.keys.map((nodeId) => _buildNodeCard(nodeId)),
         ],
       ),
     );
@@ -937,6 +1092,7 @@ class _HubScreenState extends State<HubScreen> {
     
     bool hasEvent = latestEvent != null;
     bool canCalculateSpeed = _activeNodes.length >= 2;
+    bool isDisabled = _disabledNodes[nodeId] ?? false;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 16.0),
@@ -948,6 +1104,25 @@ class _HubScreenState extends State<HubScreen> {
               flex: 2,
               child: Column(
                 children: [
+                  // Status & Toggle Control
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.circle, color: isDisabled ? Colors.redAccent : Colors.greenAccent, size: 12),
+                      const SizedBox(width: 4),
+                      Text(isDisabled ? "Disabled" : "Active", style: TextStyle(color: isDisabled ? Colors.redAccent : Colors.greenAccent, fontWeight: FontWeight.bold)),
+                      const Spacer(),
+                      Switch(
+                        value: !isDisabled,
+                        activeThumbColor: Colors.greenAccent, // Changed from activeColor to activeThumbColor
+                        inactiveThumbColor: Colors.redAccent,
+                        onChanged: (val) {
+                          FirebaseDatabase.instance.ref('node_settings/$nodeId/is_disabled').set(!val);
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
                   Text(nodeId.toUpperCase(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
                   const SizedBox(height: 4),
                   Text("Lat: $latStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
@@ -983,7 +1158,9 @@ class _HubScreenState extends State<HubScreen> {
                   Container(
                     height: 120,
                     decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
-                    child: CustomPaint(painter: LiveStreamPainter(waveform, strokeColor: Colors.blueAccent)),
+                    child: isDisabled 
+                        ? const Center(child: Text("DATA STREAM HALTED", style: TextStyle(color: Colors.redAccent, letterSpacing: 2.0, fontWeight: FontWeight.bold)))
+                        : CustomPaint(painter: LiveStreamPainter(waveform, strokeColor: Colors.blueAccent)),
                   ),
                 ],
               ),
