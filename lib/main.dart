@@ -48,17 +48,13 @@ class TectonicLineData {
   }
 }
 
+const Map<String, int> _stepClassColors = {
+  'sub': 0xFFFF5252, 'ccb': 0xFFFFAB40, 'ctf': 0xFF69F0AE, 
+  'crb': 0xFF7C4DFF, 'osr': 0xFF448AFF, 'otf': 0xFFB2FF59, 'ocr': 0xFFFF4081
+};
+
 int _getStepClassColorValue(String stepClass) {
-  switch (stepClass.toUpperCase()) {
-    case 'SUB': return 0xFFFF5252; 
-    case 'CCB': return 0xFFFFAB40; 
-    case 'CTF': return 0xFF69F0AE; 
-    case 'CRB': return 0xFF7C4DFF; 
-    case 'OSR': return 0xFF448AFF; 
-    case 'OTF': return 0xFFB2FF59; 
-    case 'OCR': return 0xFFFF4081; 
-    default: return 0xFF9E9E9E;    
-  }
+  return _stepClassColors[stepClass.toLowerCase()] ?? 0xFF9E9E9E;
 }
 
 List<TectonicLineData> parseTectonicJsonInBackground(String jsonStr) {
@@ -69,33 +65,42 @@ List<TectonicLineData> parseTectonicJsonInBackground(String jsonStr) {
     for (var feature in decoded['features']) {
       if (feature is Map) {
         String stepClass = 'UNKNOWN';
-        
         if (feature['properties'] is Map) {
           stepClass = feature['properties']['STEPCLASS']?.toString() ?? 'UNKNOWN';
         }
         
         int colorVal = _getStepClassColorValue(stepClass);
 
+        double minLat = 90.0, maxLat = -90.0, minLng = 180.0, maxLng = -180.0;
+        bool hasBbox = false;
+
+        if (feature['bbox'] is List && feature['bbox'].length >= 4) {
+           minLng = (feature['bbox'][0] as num).toDouble();
+           minLat = (feature['bbox'][1] as num).toDouble();
+           maxLng = (feature['bbox'][2] as num).toDouble();
+           maxLat = (feature['bbox'][3] as num).toDouble();
+           hasBbox = true;
+        }
+
         if (feature['geometry'] is Map) {
           var geom = feature['geometry'];
           
           if (geom['type'] == 'LineString' && geom['coordinates'] is List) {
             List<List<double>> points = [];
-            double minLat = 90.0, maxLat = -90.0, minLng = 180.0, maxLng = -180.0;
             for (var pt in geom['coordinates']) {
               if (pt is List && pt.length >= 2) {
                 double lng = (pt[0] as num).toDouble();
                 double lat = (pt[1] as num).toDouble();
     
-                if (lat < minLat) minLat = lat;
-                if (lat > maxLat) maxLat = lat;
-                if (lng < minLng) minLng = lng;
-                if (lng > maxLng) maxLng = lng;
-
+                if (!hasBbox) {
+                  if (lat < minLat) minLat = lat;
+                  if (lat > maxLat) maxLat = lat;
+                  if (lng < minLng) minLng = lng;
+                  if (lng > maxLng) maxLng = lng;
+                }
                 points.add([lat, lng]);
               }
             }
-
             if (points.isNotEmpty) {
               result.add(TectonicLineData(points, colorVal, minLat, maxLat, minLng, maxLng));
             }
@@ -104,18 +109,17 @@ List<TectonicLineData> parseTectonicJsonInBackground(String jsonStr) {
             for (var line in geom['coordinates']) {
               if (line is List) {
                 List<List<double>> points = [];
-                double minLat = 90.0, maxLat = -90.0, minLng = 180.0, maxLng = -180.0;
-                
                 for (var pt in line) {
                   if (pt is List && pt.length >= 2) {
                     double lng = (pt[0] as num).toDouble();
                     double lat = (pt[1] as num).toDouble();
                     
-                    if (lat < minLat) minLat = lat;
-                    if (lat > maxLat) maxLat = lat;
-                    if (lng < minLng) minLng = lng;
-                    if (lng > maxLng) maxLng = lng;
-
+                    if (!hasBbox) {
+                      if (lat < minLat) minLat = lat;
+                      if (lat > maxLat) maxLat = lat;
+                      if (lng < minLng) minLng = lng;
+                      if (lng > maxLng) maxLng = lng;
+                    }
                     points.add([lat, lng]);
                   }
                 }
@@ -278,7 +282,7 @@ TdoaResult? _calculateTdoaEpicenter(List<Map<String, dynamic>> readings) {
 // ----------------------------------------------------------------------
 // REACTIVE TELEMETRY STATE (DECOUPLED FROM UI)
 // ----------------------------------------------------------------------
-class TelemetryState extends ChangeNotifier {
+class TelemetryState {
   final List<double> networkPeakWaveform = List.filled(60, 0.0);
   final Map<String, List<double>> nodeWaveforms = {};
   
@@ -297,7 +301,6 @@ class TelemetryState extends ChangeNotifier {
     nodeWaveforms.removeWhere((key, _) => !activeIds.contains(key));
     
     headIndex = (headIndex + 1) % 60; 
-    notifyListeners();
   }
 }
 
@@ -795,9 +798,11 @@ class HubScreen extends StatefulWidget {
   State<HubScreen> createState() => _HubScreenState();
 }
 
-class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
+class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, TickerProviderStateMixin{
   late final DatabaseReference _networkRef;
   late final DatabaseReference _liveRef;
+
+  late AnimationController _waveAnimationController;
   
   final TelemetryState _telemetryState = TelemetryState();
 
@@ -846,16 +851,26 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
   StreamSubscription? _threeAxisSettingsSub;
 
   @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _hubId = 'hub_${math.Random().nextInt(999999)}';
-    _networkRef = FirebaseDatabase.instance.ref('sensor_network');
-    _liveRef = FirebaseDatabase.instance.ref('live_waves');
-    
-    _hubBootTimeUs = DateTime.now().millisecondsSinceEpoch * 1000;
+void initState() {
+  super.initState();
+  WidgetsBinding.instance.addObserver(this);
 
-    FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId').onDisconnect().remove();
+  _waveAnimationController = AnimationController(
+    vsync: this, 
+    duration: const Duration(seconds: 1)
+  )..repeat();
+
+  final currentUser = FirebaseAuth.instance.currentUser;
+  _hubId = currentUser != null 
+      ? 'hub_${currentUser.uid.substring(0, 10)}' 
+      : 'hub_${math.Random().nextInt(999999)}';
+
+  _networkRef = FirebaseDatabase.instance.ref('sensor_network');
+  _liveRef = FirebaseDatabase.instance.ref('live_waves');
+  
+  _hubBootTimeUs = DateTime.now().millisecondsSinceEpoch * 1000;
+
+  FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId').onDisconnect().remove();
     
     if (kIsWeb || defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS) {
       _initHubGPS();
@@ -1142,6 +1157,66 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     );
   }
 
+  Future<void> _purgeInactiveDevices() async {
+    final int now = DateTime.now().millisecondsSinceEpoch;
+    const int timeoutMs = 60000; // 60 seconds of inactivity
+
+    try {
+      // 1. Clean inactive nodes
+      final nodesSnap = await FirebaseDatabase.instance.ref('nodes_presence').get();
+      if (nodesSnap.exists && nodesSnap.value != null) {
+        final mapVal = nodesSnap.value;
+        if (mapVal is Map) {
+          for (var key in mapVal.keys) {
+            final nodeData = mapVal[key];
+            if (nodeData is Map && nodeData['timestamp'] != null) {
+              int ts = (nodeData['timestamp'] as num).toInt();
+              if (now - ts > timeoutMs) {
+                await FirebaseDatabase.instance.ref('nodes_presence/$key').remove();
+              }
+            }
+          }
+        }
+      }
+
+      // 2. Clean inactive hubs (excluding this current hub)
+      final hubsSnap = await FirebaseDatabase.instance.ref('diagnostic_hubs').get();
+      if (hubsSnap.exists && hubsSnap.value != null) {
+        final mapVal = hubsSnap.value;
+        if (mapVal is Map) {
+          for (var key in mapVal.keys) {
+            if (key.toString() == _hubId) continue; // Always keep ourselves active
+            
+            final hubData = mapVal[key];
+            if (hubData is Map && hubData['timestamp'] != null) {
+              int ts = (hubData['timestamp'] as num).toInt();
+              if (now - ts > timeoutMs) {
+                await FirebaseDatabase.instance.ref('diagnostic_hubs/$key').remove();
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Clear old epicenters from the UI
+      setState(() {
+        _epicenterDataList.clear();
+        _rebuildCachedMarkers();
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Inactive devices safely removed from the network."),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("Purge error: $e");
+    }
+  }
+
   void _showConfirmationDialog(BuildContext context, String range) {
     String rangeLabel = "";
     switch (range) {
@@ -1325,6 +1400,10 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
       type: MapItemType.epicenter,
       tooltipMessage: "$label\nLat: ${location.latitude.toStringAsFixed(4)}, Lng: ${location.longitude.toStringAsFixed(4)}$depthStr\nCalculated Speed: ${calculatedSpeed.toStringAsFixed(2)} m/s",
     ));
+    
+    if (_epicenterDataList.length > 50) {
+      _epicenterDataList.removeAt(0);
+    }
     
     setState(() {
       _rebuildCachedMarkers();
@@ -1599,13 +1678,13 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     _networkAddSub?.cancel();
     _networkChangeSub?.cancel();
     _liveSub?.cancel();
+    _waveAnimationController.dispose();
     _hubPositionSub?.cancel();
     _nodesPresenceSub?.cancel();
     _hubsPresenceSub?.cancel();
     _nodeSettingsSub?.cancel();
     _hpfSettingsSub?.cancel();
     _threeAxisSettingsSub?.cancel();
-    _telemetryState.dispose();
     FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId').remove();
     super.dispose();
   }
@@ -1675,7 +1754,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
                       height: 120,
                       decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
                       child: AnimatedBuilder(
-                        animation: _telemetryState,
+                        animation: _waveAnimationController,
                         builder: (context, child) {
                           return CustomPaint(painter: LiveStreamPainter(_telemetryState.networkPeakWaveform, _telemetryState.headIndex));
                         }
@@ -1786,7 +1865,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
                     height: 80,
                     decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
                     child: AnimatedBuilder(
-                      animation: _telemetryState,
+                      animation: _waveAnimationController,
                       builder: (context, child) {
                          final waveform = _telemetryState.nodeWaveforms[nodeId] ?? List.filled(60, 0.0);
                          return CustomPaint(painter: LiveStreamPainter(waveform, _telemetryState.headIndex));
@@ -1964,6 +2043,18 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
                   ),
                 ),
             ],
+          ),
+        ),
+
+        Positioned(
+          bottom: 16,
+          right: 16,
+          child: FloatingActionButton.extended(
+            heroTag: 'purge_btn',
+            backgroundColor: Colors.orangeAccent.withValues(alpha: 0.9),
+            icon: const Icon(Icons.cleaning_services, color: Colors.white),
+            label: const Text("CLEAR INACTIVE", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            onPressed: _purgeInactiveDevices,
           ),
         ),
         
