@@ -34,6 +34,9 @@ dependencies:
   firebase_core: ^3.6.0
   firebase_database: ^11.1.5
   sensors_plus: ^6.1.0
+  flutter_map: ^6.1.0      # High-performance native map rendering
+  latlong2: ^0.9.0         # Geodesic math and coordinates
+  geolocator: ^10.1.0      # Hardware GPS access
 
 dev_dependencies:
   flutter_test:
@@ -56,7 +59,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
-
+  assets:
+    - assets/protomaps_tectonic_base/
+    - assets/data/tectonic_boundaries.geojson
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

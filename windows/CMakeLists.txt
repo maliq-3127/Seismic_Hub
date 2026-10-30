@@ -1,5 +1,7 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.14)
+# Force minimum policy version to satisfy Firebase C++ SDK requirements
+set(CMAKE_POLICY_VERSION_MINIMUM "3.5" CACHE STRING "Minimum CMake policy version" FORCE)
 project(gyro_hub LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change

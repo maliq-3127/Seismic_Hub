@@ -1,4 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Required for Firebase Realtime Database telemetry -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    
+    <!-- Required for Geolocator hardware GPS access -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
     <application
         android:label="gyro_hub"
         android:name="${applicationName}"

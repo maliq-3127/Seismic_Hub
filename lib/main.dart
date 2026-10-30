@@ -1,27 +1,40 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart'; 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart' hide Path;
+import 'package:geolocator/geolocator.dart';
 import 'dart:math' as math;
+import 'dart:async';
 import 'disturbance_detector.dart';
 import 'firebase_options.dart';
-import 'dart:async';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
   try {
-    // Check if Firebase is already initialized to prevent [core/duplicate-app]
     if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp(
-        options: DefaultFirebaseOptions.currentPlatform,
-      );
+      FirebaseOptions options;
+      if (kIsWeb) {
+        options = DefaultFirebaseOptions.web;
+      } else if (defaultTargetPlatform == TargetPlatform.android) {
+        options = DefaultFirebaseOptions.android;
+      } else if (defaultTargetPlatform == TargetPlatform.iOS) {
+        options = DefaultFirebaseOptions.ios;
+      } else if (defaultTargetPlatform == TargetPlatform.windows) {
+        options = DefaultFirebaseOptions.windows;
+      } else {
+        options = DefaultFirebaseOptions.web; 
+      }
+      
+      await Firebase.initializeApp(options: options);
     }
   } catch (e) {
-    // FIX: Replaced standard print with debugPrint for production safety
     debugPrint("Firebase init failed: $e");
   }
-
   runApp(const GyroApp());
 }
 
@@ -31,7 +44,7 @@ class GyroApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Seismic Network V4',
+      title: 'Seismic Network',
       theme: ThemeData.dark(useMaterial3: true).copyWith(
         scaffoldBackgroundColor: const Color(0xFF0F0F12),
         cardColor: const Color(0xFF16161F),
@@ -71,7 +84,7 @@ class RoleSelectionScreen extends StatelessWidget {
 }
 
 // ----------------------------------------------------------------------
-// 2. NODE SCREEN (Added Sliders & Real-Time Wave)
+// 2. NODE SCREEN
 // ----------------------------------------------------------------------
 class NodeScreen extends StatefulWidget {
   const NodeScreen({super.key});
@@ -80,28 +93,55 @@ class NodeScreen extends StatefulWidget {
 }
 
 class _NodeScreenState extends State<NodeScreen> {
-  String nodeID = 'node_1'; 
+  late final String nodeID; 
   late DatabaseReference _database;
   bool _isStreaming = false;
   final DisturbanceDetector _detector = DisturbanceDetector();
   double _calibrationProgress = 0.0;
+  
+  LatLng _currentLocation = const LatLng(17.9846, -76.9714);
 
-  // Real-time pushing timer
   Timer? _liveWaveTimer;
   double _currentWaveMagnitude = 0.0;
 
-  // StreamSubscription variables to prevent memory leaks
   StreamSubscription? _gyroSub;
   StreamSubscription? _calibSub;
   StreamSubscription? _waveSub;
   StreamSubscription? _distSub;
+  StreamSubscription<Position>? _positionSub;
+  StreamSubscription? _sensitivitySub; 
+  StreamSubscription? _hpfSub;
 
   @override
   void initState() {
     super.initState();
+    nodeID = 'node_${math.Random().nextInt(999999)}';
     _database = FirebaseDatabase.instance.ref('sensor_network/$nodeID');
+    
+    if (kIsWeb || defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS) {
+      _initGPS();
+    }
 
-    _gyroSub = gyroscopeEventStream().listen((event) {
+    _sensitivitySub = FirebaseDatabase.instance.ref('node_settings/$nodeID/sensitivity').onValue.listen((event) {
+      if (event.snapshot.value != null && mounted) {
+        setState(() {
+          _detector.sensitivityMultiplier = (event.snapshot.value as num).toDouble();
+        });
+      }
+    });
+
+    // Listen to real-time high-pass filter changes from the Hub
+    _hpfSub = FirebaseDatabase.instance.ref('global_settings/hpf_alpha').onValue.listen((event) {
+      if (event.snapshot.value != null && mounted) {
+        setState(() {
+          _detector.hpfAlpha = (event.snapshot.value as num).toDouble();
+        });
+      }
+    });
+
+    _gyroSub = gyroscopeEventStream(
+      samplingPeriod: const Duration(milliseconds: 20)
+    ).listen((event) {
       if (_isStreaming) _detector.processGyroscopeData(event.x, event.y);
     });
 
@@ -117,37 +157,97 @@ class _NodeScreenState extends State<NodeScreen> {
           'node_id': nodeID,
           'event_type': 'disturbance',
           'angle': result.angleDegrees,
-          'speed_mps': result.estimatedSpeedMps,
+          'speed_mps': result.estimatedSpeedMps, 
           'reset_time_ms': result.resetTime.inMilliseconds,
           'timestamp_us': result.preciseTimestampUs,
+          'lat': _currentLocation.latitude,
+          'lng': _currentLocation.longitude,
         });
       }
     });
   }
 
+  Future<void> _initGPS() async {
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return;
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) return;
+      }
+
+      _positionSub = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 2)
+      ).listen((Position position) {
+        if (mounted) {
+          setState(() {
+            _currentLocation = LatLng(position.latitude, position.longitude);
+          });
+          
+          final presenceRef = FirebaseDatabase.instance.ref('nodes_presence/$nodeID');
+          try {
+            presenceRef.onDisconnect().remove();
+          } catch (_) {}
+          
+          presenceRef.set({
+            'lat': position.latitude,
+            'lng': position.longitude,
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+          });
+        }
+      });
+    } catch (e) {
+      debugPrint("GPS Retrieval Error: $e");
+    }
+  }
+
   void _toggleStreaming(bool val) {
     setState(() {
       _isStreaming = val;
+      final liveRef = FirebaseDatabase.instance.ref('live_waves/$nodeID');
+      
       if (_isStreaming) {
         _detector.forceRecalibration();
-        // Push live wave data to Firebase at 20Hz (50ms) for real-time graph
+        
+        try {
+          liveRef.onDisconnect().remove();
+        } catch (_) {}
+
         _liveWaveTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-           FirebaseDatabase.instance.ref('live_waves/$nodeID').set(_currentWaveMagnitude);
+           liveRef.set({
+             'mag': _currentWaveMagnitude,
+             'ts': DateTime.now().millisecondsSinceEpoch,
+           });
         });
       } else {
         _liveWaveTimer?.cancel();
+        try {
+          liveRef.onDisconnect().cancel();
+        } catch (_) {}
+        liveRef.remove();
       }
     });
   }
 
   @override
   void dispose() {
+    _positionSub?.cancel();
+    _sensitivitySub?.cancel();
+    _hpfSub?.cancel();
+    FirebaseDatabase.instance.ref('nodes_presence/$nodeID').remove();
     _liveWaveTimer?.cancel();
+    final liveRef = FirebaseDatabase.instance.ref('live_waves/$nodeID');
+    try {
+      liveRef.onDisconnect().cancel();
+    } catch (_) {}
+    liveRef.remove();
+    
     _gyroSub?.cancel();
     _calibSub?.cancel();
     _waveSub?.cancel();
     _distSub?.cancel();
-    
     _detector.dispose();
     super.dispose();
   }
@@ -157,11 +257,16 @@ class _NodeScreenState extends State<NodeScreen> {
     bool isCalibrating = _detector.state == DetectorState.calibrating;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Node Tuner')),
+      appBar: AppBar(title: Text('Node Tuner ($nodeID)')),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24.0),
         child: Column(
           children: [
+            Text(
+              "GPS Locked: ${_currentLocation.latitude.toStringAsFixed(4)}, ${_currentLocation.longitude.toStringAsFixed(4)}", 
+              style: const TextStyle(color: Colors.greenAccent),
+            ),
+            const SizedBox(height: 20),
             if (isCalibrating && _isStreaming) ...[
               LinearProgressIndicator(value: _calibrationProgress),
               const SizedBox(height: 10),
@@ -169,37 +274,14 @@ class _NodeScreenState extends State<NodeScreen> {
             ] else ...[
               Icon(Icons.radar, size: 60, color: _isStreaming ? Colors.greenAccent : Colors.grey),
             ],
-            const SizedBox(height: 30),
+            const SizedBox(height: 40),
             
-            // SENSITIVITY SLIDER
-            const Text("Sensitivity Multiplier", style: TextStyle(fontWeight: FontWeight.bold)),
-            Slider(
-              value: _detector.sensitivityMultiplier,
-              min: 0.1,
-              max: 3.0,
-              divisions: 29,
-              label: _detector.sensitivityMultiplier.toStringAsFixed(1),
-              activeColor: Colors.amber,
-              onChanged: (val) => setState(() => _detector.sensitivityMultiplier = val),
-            ),
+            Text("Remote Sensitivity: ${_detector.sensitivityMultiplier.toStringAsFixed(2)}x", style: const TextStyle(color: Colors.grey)),
             
-            // SPEED CALIBRATION SLIDER
-            const Text("Speed/Intensity Calibration", style: TextStyle(fontWeight: FontWeight.bold)),
-            Slider(
-              value: _detector.speedMultiplier,
-              min: 0.1,
-              max: 3.0,
-              divisions: 29,
-              label: _detector.speedMultiplier.toStringAsFixed(1),
-              activeColor: Colors.cyanAccent,
-              onChanged: (val) => setState(() => _detector.speedMultiplier = val),
-            ),
-
             const SizedBox(height: 40),
             SwitchListTile(
               title: const Text('Transmit Telemetry'),
               value: _isStreaming,
-              // FIX: Replaced deprecated activeColor with activeThumbColor
               activeThumbColor: Colors.greenAccent, 
               onChanged: _toggleStreaming,
             ),
@@ -211,8 +293,24 @@ class _NodeScreenState extends State<NodeScreen> {
 }
 
 // ----------------------------------------------------------------------
-// 3. THE HUB (360 Radar & Real-Time Graph)
+// 3. THE HUB
 // ----------------------------------------------------------------------
+enum MapItemType { hub, node, epicenter }
+
+class MapItemData {
+  final String id;
+  final LatLng loc;
+  final MapItemType type;
+  final String tooltipMessage;
+
+  MapItemData({
+    required this.id,
+    required this.loc,
+    required this.type,
+    required this.tooltipMessage,
+  });
+}
+
 class HubScreen extends StatefulWidget {
   const HubScreen({super.key});
   @override
@@ -220,144 +318,864 @@ class HubScreen extends StatefulWidget {
 }
 
 class _HubScreenState extends State<HubScreen> {
-  final DatabaseReference _networkRef = FirebaseDatabase.instance.ref('sensor_network');
-  final DatabaseReference _liveRef = FirebaseDatabase.instance.ref('live_waves');
+  late final DatabaseReference _networkRef;
+  late final DatabaseReference _liveRef;
 
-  Map<String, dynamic>? _latestEvent;
-  final List<double> _realTimeWaveform = List.filled(60, 0.0, growable: true); 
+  final List<double> _networkPeakWaveform = List.filled(60, 0.0, growable: true); 
+  final Map<String, List<double>> _nodeWaveforms = {};
+  final Map<String, Map<String, dynamic>> _nodeLatestEvents = {};
+  
+  final Map<String, LatLng> _activeNodes = {};
+  final Map<String, LatLng> _activeHubs = {};
+  final Map<String, double> _nodeSensitivities = {}; 
+  late final String _hubId;
 
-  // Track Hub stream subscriptions
-  StreamSubscription? _networkSub;
+  Map<String, dynamic>? _firstReadingInPair;
+  
+  LatLng _hubLocation = const LatLng(17.9846, -76.9714);
+  
+  String _currentMapStyle = 'dark_all';
+  bool _isTectonicLayerActive = false;
+  double _globalHpfAlpha = 0.9;
+
+  final List<MapItemData> _epicenterDataList = [];
+  
+  final MapController _mapController = MapController();
+  bool _isMapReady = false;
+
+  late final int _hubBootTimeUs;
+  StreamSubscription? _networkAddSub;
+  StreamSubscription? _networkChangeSub;
   StreamSubscription? _liveSub;
+  StreamSubscription<Position>? _hubPositionSub;
+  StreamSubscription? _nodesPresenceSub;
+  StreamSubscription? _hubsPresenceSub;
+  StreamSubscription? _nodeSettingsSub;
+  StreamSubscription? _hpfSettingsSub;
 
   @override
   void initState() {
     super.initState();
+    _hubId = 'hub_${math.Random().nextInt(999999)}';
+    _networkRef = FirebaseDatabase.instance.ref('sensor_network');
+    _liveRef = FirebaseDatabase.instance.ref('live_waves');
     
-    // Listen for distinct impacts
-    _networkSub = _networkRef.onValue.listen((event) {
-      if (event.snapshot.value != null) {
-        final rawData = event.snapshot.value as Map;
-        rawData.forEach((key, data) {
-          final map = Map<String, dynamic>.from(data as Map);
-          if (map['event_type'] == 'disturbance') {
-            if (mounted) setState(() => _latestEvent = map);
-          }
+    _hubBootTimeUs = DateTime.now().millisecondsSinceEpoch * 1000;
+    
+    if (kIsWeb || defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS) {
+      _initHubGPS();
+    }
+    
+    _listenToNetworkPresence();
+    _listenToFirebase();
+  }
+
+  Future<void> _initHubGPS() async {
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return;
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) return;
+      }
+
+      _hubPositionSub = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 2)
+      ).listen((Position position) {
+        if (mounted) {
+          setState(() {
+            _hubLocation = LatLng(position.latitude, position.longitude);
+          });
+          
+          final hubRef = FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId');
+          try {
+            hubRef.onDisconnect().remove();
+          } catch (_) {}
+          
+          hubRef.set({
+            'lat': position.latitude,
+            'lng': position.longitude,
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+          });
+        }
+      });
+    } catch (e) {
+      debugPrint("Hub GPS Error: $e");
+    }
+  }
+
+  void _listenToNetworkPresence() {
+    _nodesPresenceSub = FirebaseDatabase.instance.ref('nodes_presence').onValue.listen((event) {
+      if (!mounted) return;
+      final val = event.snapshot.value as Map?;
+      if (val != null) {
+        setState(() {
+          _activeNodes.clear();
+          val.forEach((key, value) {
+            if (value is Map) {
+              _activeNodes[key.toString()] = LatLng((value['lat'] as num).toDouble(), (value['lng'] as num).toDouble());
+            }
+          });
+        });
+      } else {
+        setState(() => _activeNodes.clear());
+      }
+    });
+
+    _hubsPresenceSub = FirebaseDatabase.instance.ref('diagnostic_hubs').onValue.listen((event) {
+      if (!mounted) return;
+      final val = event.snapshot.value as Map?;
+      if (val != null) {
+        setState(() {
+          _activeHubs.clear();
+          val.forEach((key, value) {
+            if (value is Map) {
+              _activeHubs[key.toString()] = LatLng((value['lat'] as num).toDouble(), (value['lng'] as num).toDouble());
+            }
+          });
         });
       }
     });
 
-    // Listen for high-speed live wave data (Real-Time UI)
-    _liveSub = _liveRef.onValue.listen((event) {
+    _nodeSettingsSub = FirebaseDatabase.instance.ref('node_settings').onValue.listen((event) {
+      if (!mounted) return;
+      final val = event.snapshot.value as Map?;
+      if (val != null) {
+        setState(() {
+          val.forEach((key, value) {
+             if (value is Map && value['sensitivity'] != null) {
+                _nodeSensitivities[key.toString()] = (value['sensitivity'] as num).toDouble();
+             }
+          });
+        });
+      }
+    });
+
+    _hpfSettingsSub = FirebaseDatabase.instance.ref('global_settings/hpf_alpha').onValue.listen((event) {
+      if (!mounted) return;
       if (event.snapshot.value != null) {
-        final rawData = event.snapshot.value as Map;
-        // Assuming we are monitoring node_1's live wave
-        if (rawData.containsKey('node_1')) {
-          double val = (rawData['node_1'] as num).toDouble();
-          if (mounted) {
-            setState(() {
-              _realTimeWaveform.add(val);
-              if (_realTimeWaveform.length > 60) _realTimeWaveform.removeAt(0);
-            });
-          }
-        }
+        setState(() {
+          _globalHpfAlpha = (event.snapshot.value as num).toDouble();
+        });
       }
     });
   }
 
+  void _listenToFirebase() {
+    _networkAddSub = _networkRef.onChildAdded.listen((event) => _handleIncomingNodeData(event.snapshot));
+    _networkChangeSub = _networkRef.onChildChanged.listen((event) => _handleIncomingNodeData(event.snapshot));
+
+    _liveSub = _liveRef.onValue.listen((event) {
+      final val = event.snapshot.value;
+      Map rawData = {};
+      
+      if (val is Map) {
+        rawData = Map.from(val);
+      } else if (val is List) {
+        for (int i = 0; i < val.length; i++) {
+          if (val[i] != null) rawData[i.toString()] = val[i];
+        }
+      }
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+
+      if (mounted) {
+        setState(() {
+          double networkPeakMagnitude = 0.0;
+          Set<String> liveNodeIds = {}; 
+
+          rawData.forEach((key, value) {
+            if (value is Map) {
+              String nodeId = key.toString();
+              int ts = (value['ts'] as num? ?? 0).toInt();
+              
+              if (now - ts < 2000) {
+                liveNodeIds.add(nodeId);
+                double val = (value['mag'] as num? ?? 0.0).toDouble();
+                
+                if (val > networkPeakMagnitude) {
+                  networkPeakMagnitude = val;
+                }
+
+                if (!_nodeWaveforms.containsKey(nodeId)) {
+                   _nodeWaveforms[nodeId] = List.filled(60, 0.0, growable: true);
+                }
+                _nodeWaveforms[nodeId]!.add(val);
+                if (_nodeWaveforms[nodeId]!.length > 60) _nodeWaveforms[nodeId]!.removeAt(0);
+              }
+            }
+          });
+
+          _nodeWaveforms.removeWhere((key, _) => !liveNodeIds.contains(key));
+          _networkPeakWaveform.add(networkPeakMagnitude);
+          if (_networkPeakWaveform.length > 60) _networkPeakWaveform.removeAt(0);
+        });
+      }
+    });
+  }
+
+  void _handleIncomingNodeData(DataSnapshot snapshot) {
+    if (snapshot.value == null || !mounted) return;
+    
+    final map = Map<String, dynamic>.from(snapshot.value as Map);
+    if (map['event_type'] != 'disturbance') return;
+
+    int eventTimestamp = (map['timestamp_us'] as num? ?? 0).toInt();
+    if (eventTimestamp < _hubBootTimeUs) return;
+
+    setState(() {
+      String nodeId = map['node_id'] ?? 'unknown';
+      _nodeLatestEvents[nodeId] = map;
+      _processDisturbanceForMap(map);
+    });
+  }
+
+  void _processDisturbanceForMap(Map<String, dynamic> newReading) {
+    if (_activeNodes.length < 2) return; 
+
+    String nodeId = newReading['node_id'] ?? 'unknown';
+
+    if (_firstReadingInPair == null) {
+      _firstReadingInPair = newReading;
+      return;
+    }
+
+    if (_firstReadingInPair!['node_id'] == nodeId) {
+      _firstReadingInPair = newReading; 
+      return;
+    }
+
+    double lat1 = (_firstReadingInPair!['lat'] as num).toDouble();
+    double lng1 = (_firstReadingInPair!['lng'] as num).toDouble();
+    LatLng loc1 = LatLng(lat1, lng1);
+
+    double lat2 = (newReading['lat'] as num).toDouble();
+    double lng2 = (newReading['lng'] as num).toDouble();
+    LatLng loc2 = LatLng(lat2, lng2);
+
+    int time1Us = (_firstReadingInPair!['timestamp_us'] as num).toInt();
+    int time2Us = (newReading['timestamp_us'] as num).toInt();
+    
+    double timeDeltaSecs = (time2Us - time1Us).abs() / 1000000.0;
+    double distanceBetweenNodes = const Distance().as(LengthUnit.Meter, loc1, loc2);
+    
+    double calculatedWaveSpeedMps = timeDeltaSecs > 0 ? (distanceBetweenNodes / timeDeltaSecs) : 0.0;
+    double originAngle = (_firstReadingInPair!['angle'] as num).toDouble();
+    
+    double epicenterDistanceMeters = timeDeltaSecs * calculatedWaveSpeedMps;
+    LatLng epicenter = const Distance().offset(loc1, epicenterDistanceMeters, originAngle);
+
+    _plotEpicenter(epicenter, "Bolt Equation Epicenter", calculatedWaveSpeedMps);
+    _firstReadingInPair = null; 
+  }
+
+  void _plotEpicenter(LatLng location, String label, double calculatedSpeed) {
+    _epicenterDataList.add(MapItemData(
+      id: 'epi_${DateTime.now().millisecondsSinceEpoch}_${math.Random().nextInt(1000)}',
+      loc: location,
+      type: MapItemType.epicenter,
+      tooltipMessage: "$label\nLat: ${location.latitude.toStringAsFixed(4)}, Lng: ${location.longitude.toStringAsFixed(4)}\nCalculated Speed: ${calculatedSpeed.toStringAsFixed(2)} m/s",
+    ));
+    
+    if (_isMapReady) {
+      try {
+        _mapController.move(location, 18.0);
+      } catch (e) {
+        debugPrint("Failed to move MapController: $e");
+      }
+    }
+  }
+
+  List<Marker> _buildAllMarkers() {
+    List<MapItemData> rawItems = [];
+
+    _activeHubs.forEach((id, loc) {
+      rawItems.add(MapItemData(
+        id: id,
+        loc: loc,
+        type: MapItemType.hub,
+        tooltipMessage: "Diagnostic Hub: $id\nLat: ${loc.latitude.toStringAsFixed(4)}, Lng: ${loc.longitude.toStringAsFixed(4)}",
+      ));
+    });
+
+    _activeNodes.forEach((id, loc) {
+      if (_nodeWaveforms.containsKey(id)) {
+        rawItems.add(MapItemData(
+          id: id,
+          loc: loc,
+          type: MapItemType.node,
+          tooltipMessage: "Node: $id\nLat: ${loc.latitude.toStringAsFixed(4)}, Lng: ${loc.longitude.toStringAsFixed(4)}",
+        ));
+      }
+    });
+
+    rawItems.addAll(_epicenterDataList);
+
+    Map<String, List<MapItemData>> grid = {};
+    for (var item in rawItems) {
+      String key = "${item.loc.latitude.toStringAsFixed(4)}_${item.loc.longitude.toStringAsFixed(4)}";
+      if (grid.containsKey(key)) {
+        grid[key]!.add(item);
+      } else {
+        grid[key] = [item];
+      }
+    }
+
+    List<Marker> finalMarkers = [];
+    for (var group in grid.values) {
+      if (group.length == 1) {
+        finalMarkers.add(_buildMarkerFromData(group.first, group.first.loc));
+      } else {
+        double radiusDegrees = 0.00015 + (group.length * 0.000015); 
+        double sumLat = 0.0;
+        double sumLng = 0.0;
+        for (var item in group) {
+          sumLat += item.loc.latitude;
+          sumLng += item.loc.longitude;
+        }
+        
+        double centerLat = sumLat / group.length;
+        double centerLng = sumLng / group.length;
+
+        for (int i = 0; i < group.length; i++) {
+          double angle = (2 * math.pi * i) / group.length;
+          double latOffset = radiusDegrees * math.cos(angle);
+          double lngOffset = radiusDegrees * math.sin(angle);
+          
+          LatLng spreadLoc = LatLng(centerLat + latOffset, centerLng + lngOffset);
+          finalMarkers.add(_buildMarkerFromData(group[i], spreadLoc));
+        }
+      }
+    }
+
+    return finalMarkers;
+  }
+
+  Marker _buildMarkerFromData(MapItemData data, LatLng renderLoc) {
+    Widget iconWidget;
+    switch (data.type) {
+      case MapItemType.hub:
+        iconWidget = Tooltip(
+          message: data.tooltipMessage,
+          child: const Icon(Icons.hub, color: Colors.purpleAccent, size: 40),
+        );
+        break;
+      case MapItemType.node:
+        iconWidget = Tooltip(
+          message: data.tooltipMessage,
+          child: const Icon(Icons.cell_tower, color: Colors.blueAccent, size: 35),
+        );
+        break;
+      case MapItemType.epicenter:
+        iconWidget = Tooltip(
+          message: data.tooltipMessage,
+          child: const Icon(Icons.crisis_alert, color: Colors.redAccent, size: 40),
+        );
+        break;
+    }
+
+    return Marker(
+      point: renderLoc,
+      width: 50,
+      height: 50,
+      child: iconWidget,
+    );
+  }
+
+  // ----------------------------------------------------------------------
+  // SETTINGS MENUS
+  // ----------------------------------------------------------------------
+  void _showSettingsMenu() {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF16161F),
+          title: const Text("Settings", style: TextStyle(color: Colors.white)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text("Map Theme", style: TextStyle(color: Colors.white70)),
+                  DropdownButton<String>(
+                    dropdownColor: const Color(0xFF16161F),
+                    value: _currentMapStyle,
+                    items: ['light_all', 'dark_all', 'rastertiles/voyager']
+                        .map((s) => DropdownMenuItem(value: s, child: Text(s.toUpperCase(), style: const TextStyle(color: Colors.white))))
+                        .toList(),
+                    onChanged: (val) {
+                      if (val != null) setState(() => _currentMapStyle = val);
+                      Navigator.pop(ctx);
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              const Text("HPF Aggressiveness", style: TextStyle(color: Colors.white70, fontSize: 14)),
+              StatefulBuilder(
+                builder: (context, setModalState) {
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: Slider(
+                          value: _globalHpfAlpha,
+                          min: 0.0,
+                          max: 1.0,
+                          divisions: 100,
+                          label: _globalHpfAlpha.toStringAsFixed(2),
+                          activeColor: Colors.purpleAccent,
+                          onChanged: (val) {
+                            setModalState(() => _globalHpfAlpha = val);
+                            setState(() => _globalHpfAlpha = val);
+                            FirebaseDatabase.instance.ref('global_settings/hpf_alpha').set(val);
+                          },
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          setModalState(() => _globalHpfAlpha = 0.9);
+                          setState(() => _globalHpfAlpha = 0.9);
+                          FirebaseDatabase.instance.ref('global_settings/hpf_alpha').set(0.9);
+                        },
+                        child: const Text("Reset", style: TextStyle(color: Colors.redAccent)),
+                      ),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.tune),
+                label: const Text("Node sensitivity..."),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blueAccent,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _showNodeSensitivityDialog();
+                },
+              )
+            ],
+          ),
+        );
+      }
+    );
+  }
+
+  void _showNodeSensitivityDialog() {
+    List<String> nodeKeys = _activeNodes.keys.toList();
+    
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF16161F),
+          title: const Text("Node Sensitivities", style: TextStyle(color: Colors.white)),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: nodeKeys.isEmpty 
+              ? const Text("No active nodes available.", style: TextStyle(color: Colors.grey))
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: nodeKeys.length,
+                  itemBuilder: (context, index) {
+                    String nodeId = nodeKeys[index];
+                    return StatefulBuilder(
+                      builder: (context, setModalState) {
+                        double currentVal = _nodeSensitivities[nodeId] ?? 1.0;
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(nodeId, style: const TextStyle(color: Colors.blueAccent, fontWeight: FontWeight.bold)),
+                            Row(
+                              children: [
+                                const Text("0.1", style: TextStyle(fontSize: 10, color: Colors.grey)),
+                                Expanded(
+                                  child: Slider(
+                                    value: currentVal,
+                                    min: 0.1, max: 3.0, divisions: 29,
+                                    label: currentVal.toStringAsFixed(1),
+                                    activeColor: Colors.amber,
+                                    onChanged: (val) {
+                                      setModalState(() => currentVal = val);
+                                      FirebaseDatabase.instance.ref('node_settings/$nodeId/sensitivity').set(val);
+                                    },
+                                  ),
+                                ),
+                                const Text("3.0", style: TextStyle(fontSize: 10, color: Colors.grey)),
+                                const SizedBox(width: 8),
+                                TextButton(
+                                  onPressed: () {
+                                    setModalState(() => currentVal = 1.00);
+                                    FirebaseDatabase.instance.ref('node_settings/$nodeId/sensitivity').set(1.00);
+                                  },
+                                  child: const Text("Reset", style: TextStyle(color: Colors.redAccent)),
+                                ),
+                              ],
+                            ),
+                          ],
+                        );
+                      }
+                    );
+                  }
+                ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Close", style: TextStyle(color: Colors.white)),
+            )
+          ],
+        );
+      }
+    );
+  }
+
   @override
   void dispose() {
-    _networkSub?.cancel();
+    _networkAddSub?.cancel();
+    _networkChangeSub?.cancel();
     _liveSub?.cancel();
+    _hubPositionSub?.cancel();
+    _nodesPresenceSub?.cancel();
+    _hubsPresenceSub?.cancel();
+    _nodeSettingsSub?.cancel();
+    _hpfSettingsSub?.cancel();
+    FirebaseDatabase.instance.ref('diagnostic_hubs/$_hubId').remove();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    double angle = (_latestEvent?['angle'] ?? 0.0).toDouble();
-    double speed = (_latestEvent?['speed_mps'] ?? 0.0).toDouble();
-
-    return Scaffold(
-      appBar: AppBar(title: const Text("HUB: Real-Time Telemetry")),
-      body: Row(
-        children: [
-          // LEFT PANEL: 360 Vector Radar
-          Expanded(
-            flex: 1,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Text("DISTURBANCE DIRECTION (360°)", style: TextStyle(letterSpacing: 2.0, color: Colors.grey)),
-                const SizedBox(height: 40),
-                Transform.rotate(
-                  // Negated the angle to invert left/right orientation while preserving up/down
-                  angle: -angle * (math.pi / 180), 
-                  child: const Icon(Icons.arrow_upward, size: 120, color: Colors.redAccent),
-                ),
-                const SizedBox(height: 20),
-                Text("${angle.toStringAsFixed(1)}°", style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
-                Text("${speed.toStringAsFixed(2)} m/s", style: const TextStyle(color: Colors.cyanAccent, fontSize: 24)),
-              ],
-            ),
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text("DIAGNOSTIC HUB"),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.settings),
+              tooltip: 'Settings',
+              onPressed: _showSettingsMenu,
+            )
+          ],
+          bottom: const TabBar(
+            tabs: [
+              Tab(icon: Icon(Icons.speed), text: "NETWORK TELEMETRY"),
+              Tab(icon: Icon(Icons.map), text: "GEOSPATIAL MAP"),
+            ],
           ),
-          
-          Container(width: 1, color: Colors.white12),
-          
-          // RIGHT PANEL: Real-Time Stream Graph
-          Expanded(
-            flex: 1,
+        ),
+        body: TabBarView(
+          physics: const NeverScrollableScrollPhysics(),
+          children: [
+            _buildTelemetryTab(),
+            _buildMapTab(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTelemetryTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text("SUMMARY", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: 2.0)),
+          const SizedBox(height: 8),
+          Card(
+            shape: RoundedRectangleBorder(side: const BorderSide(color: Colors.purpleAccent, width: 1.5), borderRadius: BorderRadius.circular(8)),
             child: Padding(
-              padding: const EdgeInsets.all(24.0),
+              padding: const EdgeInsets.all(16.0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text("LIVE KINETIC STREAM (20Hz)", style: TextStyle(letterSpacing: 1.5, color: Colors.grey)),
-                  Expanded(
-                    child: Container(
-                      margin: const EdgeInsets.only(top: 20),
-                      decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
-                      child: CustomPaint(painter: LiveStreamPainter(_realTimeWaveform)),
-                    ),
+                  const Text("PEAK NETWORK KINETIC STREAM", style: TextStyle(letterSpacing: 1.5, color: Colors.grey)),
+                  const SizedBox(height: 10),
+                  Container(
+                    height: 120,
+                    decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
+                    child: CustomPaint(painter: LiveStreamPainter(_networkPeakWaveform)),
                   ),
                 ],
               ),
             ),
           ),
+          
+          const SizedBox(height: 24),
+          const Divider(color: Colors.white24),
+          const SizedBox(height: 16),
+          
+          Text("${_activeNodes.length} ACTIVE NODES", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: 2.0)),
+          const SizedBox(height: 16),
+          if (_nodeWaveforms.isEmpty)
+            const Center(child: Text("Waiting for nodes to transmit telemetry...", style: TextStyle(color: Colors.grey))),
+          
+          ..._nodeWaveforms.keys.map((nodeId) => _buildNodeCard(nodeId)),
         ],
       ),
+    );
+  }
+
+  Widget _buildNodeCard(String nodeId) {
+    final waveform = _nodeWaveforms[nodeId] ?? List.filled(60, 0.0);
+    final latestEvent = _nodeLatestEvents[nodeId];
+    final location = _activeNodes[nodeId];
+    
+    double angle = (latestEvent?['angle'] ?? 0.0).toDouble();
+    double localSpeed = (latestEvent?['speed_mps'] ?? 0.0).toDouble();
+    String latStr = location != null ? location.latitude.toStringAsFixed(4) : "Awaiting Lock";
+    String lngStr = location != null ? location.longitude.toStringAsFixed(4) : "Awaiting Lock";
+    
+    bool hasEvent = latestEvent != null;
+    bool canCalculateSpeed = _activeNodes.length >= 2;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16.0),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Row(
+          children: [
+            Expanded(
+              flex: 2,
+              child: Column(
+                children: [
+                  Text(nodeId.toUpperCase(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
+                  const SizedBox(height: 4),
+                  Text("Lat: $latStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                  Text("Lng: $lngStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                  const SizedBox(height: 16),
+                  Transform.rotate(
+                    angle: -angle * (math.pi / 180), 
+                    child: Icon(Icons.arrow_upward, size: 40, color: hasEvent ? Colors.redAccent : Colors.grey.shade800),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    hasEvent ? "${angle.toStringAsFixed(1)}°" : "N/A", 
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: hasEvent ? Colors.white : Colors.grey.shade600)
+                  ),
+                  const SizedBox(height: 4),
+                  if (hasEvent)
+                    canCalculateSpeed 
+                      ? Text("${localSpeed.toStringAsFixed(1)} m/s", style: const TextStyle(color: Colors.cyanAccent, fontSize: 14))
+                      : const Text("Speed calc unavailable:\n<2 Active Nodes", textAlign: TextAlign.center, style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
+                ],
+              ),
+            ),
+            
+            Container(width: 1, height: 120, color: Colors.white12, margin: const EdgeInsets.symmetric(horizontal: 16)),
+            
+            Expanded(
+              flex: 5,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text("LIVE STREAM", style: TextStyle(fontSize: 12, letterSpacing: 1.0, color: Colors.grey)),
+                  const SizedBox(height: 8),
+                  Container(
+                    height: 120,
+                    decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
+                    child: CustomPaint(painter: LiveStreamPainter(waveform, strokeColor: Colors.blueAccent)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMapTab() {
+    return Stack(
+      children: [
+        FlutterMap(
+          mapController: _mapController,
+          options: MapOptions(
+            initialCenter: _hubLocation, 
+            initialZoom: 16.0,
+            maxZoom: 22.0, 
+            onMapReady: () {
+              _isMapReady = true;
+            },
+          ),
+          children: [
+            if (_isTectonicLayerActive) ...[
+              TileLayer(
+                urlTemplate: 'assets/protomaps_tectonic_base/{z}/{x}/{y}.png',
+                tileProvider: AssetTileProvider(),
+                maxNativeZoom: 12, 
+              ),
+              const OfflineTectonicVectorLayer(),
+            ] else ...[
+              TileLayer(
+                urlTemplate: 'https://{s}.basemaps.cartocdn.com/$_currentMapStyle/{z}/{x}/{y}.png',
+                subdomains: const ['a', 'b', 'c', 'd'],
+                userAgentPackageName: 'com.seismic.network', 
+                maxNativeZoom: 19, 
+              ),
+            ],
+
+            MarkerLayer(markers: _buildAllMarkers()),
+          ],
+        ),
+        
+        Positioned(
+          top: 20,
+          left: 20,
+          child: Card(
+            color: const Color(0xFF16161F).withValues(alpha: 0.95), 
+            elevation: 4,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              child: Row(
+                children: [
+                  const Text("Tectonic Plate Data", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+                  const SizedBox(width: 12),
+                  Switch(
+                    value: _isTectonicLayerActive,
+                    activeThumbColor: Colors.amberAccent, 
+                    onChanged: (val) => setState(() => _isTectonicLayerActive = val),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+
+        if (_activeNodes.length < 2)
+          Positioned(
+            bottom: 20, 
+            right: 20,
+            child: Card(
+              color: Colors.redAccent.withValues(alpha: 0.9), 
+              elevation: 8,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12.0, horizontal: 16.0),
+                child: Text(
+                  "Less than two nodes – Epicentre Calculation Unavailable",
+                  style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 14),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
 
 class LiveStreamPainter extends CustomPainter {
   final List<double> values;
-  LiveStreamPainter(this.values);
+  final Color strokeColor;
+
+  LiveStreamPainter(this.values, {this.strokeColor = Colors.greenAccent});
 
   @override
   void paint(Canvas canvas, Size size) {
     if (values.isEmpty) return;
-
-    final paint = Paint()
-      ..color = Colors.greenAccent
-      ..strokeWidth = 2.5
-      ..style = PaintingStyle.stroke;
-
+    final paint = Paint()..color = strokeColor..strokeWidth = 2.5..style = PaintingStyle.stroke;
     final path = Path();
     final double dx = size.width / (values.length - 1);
     
-    // Auto-scaling the Y axis based on current peak
-    double maxVal = values.reduce(math.max);
+    double maxVal = values.reduce((a, b) => math.max(a, b)); 
+    
     if (maxVal < 1.0) maxVal = 1.0; 
-
     path.moveTo(0, size.height - (values[0] / maxVal) * size.height);
     for (int i = 1; i < values.length; i++) {
       double yVal = size.height - (values[i] / maxVal) * size.height;
       path.lineTo(i * dx, yVal);
     }
-
     canvas.drawPath(path, paint);
+  }
+  @override
+  bool shouldRepaint(covariant LiveStreamPainter oldDelegate) => true;
+}
+
+class OfflineTectonicVectorLayer extends StatefulWidget {
+  const OfflineTectonicVectorLayer({super.key});
+  @override
+  State<OfflineTectonicVectorLayer> createState() => _OfflineTectonicVectorLayerState();
+}
+
+class _OfflineTectonicVectorLayerState extends State<OfflineTectonicVectorLayer> {
+  List<Polyline> _tectonicPolylines = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTectonicData();
+  }
+
+  Future<void> _loadTectonicData() async {
+    try {
+      final String response = await rootBundle.loadString('assets/data/tectonic_boundaries.geojson');
+      final data = json.decode(response);
+      List<Polyline> tempLines = [];
+
+      if (data['features'] != null) {
+        for (var feature in data['features']) {
+          final geometry = feature['geometry'];
+          final properties = feature['properties'] ?? {};
+          final String boundaryType = (properties['type'] ?? properties['Type'] ?? properties['TYPE'] ?? 'unknown').toString().toLowerCase();
+          
+          Color strokeColor;
+          double strokeWidth = 3.0;
+          
+          if (boundaryType.contains('convergent') || boundaryType.contains('subduction')) {
+            strokeColor = Colors.redAccent;
+            strokeWidth = 4.0;
+          } else if (boundaryType.contains('divergent') || boundaryType.contains('ridge')) {
+            strokeColor = Colors.cyanAccent;
+          } else if (boundaryType.contains('transform') || boundaryType.contains('fault')) {
+            strokeColor = Colors.amberAccent;
+          } else {
+            strokeColor = Colors.purpleAccent; 
+          }
+
+          if (geometry != null && geometry['type'] == 'LineString') {
+            List<LatLng> points = [];
+            for (var coord in geometry['coordinates']) {
+              points.add(LatLng(coord[1].toDouble(), coord[0].toDouble()));
+            }
+            tempLines.add(Polyline(points: points, color: strokeColor, strokeWidth: strokeWidth));
+          } else if (geometry != null && geometry['type'] == 'MultiLineString') {
+            for (var line in geometry['coordinates']) {
+              List<LatLng> points = [];
+              for (var coord in line) {
+                points.add(LatLng(coord[1].toDouble(), coord[0].toDouble()));
+              }
+              tempLines.add(Polyline(points: points, color: strokeColor, strokeWidth: strokeWidth));
+            }
+          }
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _tectonicPolylines = tempLines;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint("Failed to parse tectonic vector asset: $e");
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   @override
-  bool shouldRepaint(covariant LiveStreamPainter oldDelegate) => true;
+  Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator(color: Colors.amberAccent));
+    }
+    return PolylineLayer(polylines: _tectonicPolylines);
+  }
 }
