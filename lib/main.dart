@@ -17,6 +17,9 @@ import 'sensors/sensor_polling_service.dart';
 import 'services/clock_sync_service.dart';
 import 'services/throttle_mitigation_service.dart';
 import 'services/hub_hypocentre_service.dart';
+import 'services/alert_service.dart';
+import 'ui/design_system.dart';
+import 'ui/instruments.dart';
 
 // ----------------------------------------------------------------------
 // HIGH EFFICIENCY BACKGROUND ISOLATE WORKERS
@@ -205,11 +208,8 @@ class SeismicApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Seismic Network',
-      theme: ThemeData.dark(useMaterial3: true).copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0F0F12),
-        cardColor: const Color(0xFF16161F),
-      ),
+      title: 'GyroHub',
+      theme: Ds.theme(),
       home: const RoleSelectionScreen(),
     );
   }
@@ -220,26 +220,121 @@ class SeismicApp extends StatelessWidget {
 // ----------------------------------------------------------------------
 class RoleSelectionScreen extends StatelessWidget {
   const RoleSelectionScreen({super.key});
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        child: Wrap(
-          alignment: WrapAlignment.center,
-          spacing: 20,
-          runSpacing: 20,
-          children: [
-            ElevatedButton.icon(
-              icon: const Icon(Icons.phone_android),
-              label: const Text('MOBILE NODE'),
-              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const NodeScreen())),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 620),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(Ds.s6),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const StatusDot(Ds.trace, size: 9),
+                    const SizedBox(width: Ds.s3),
+                    Text('GyroHub', style: Ds.headline),
+                  ],
+                ),
+                const SizedBox(height: Ds.s2),
+                Text(
+                  'A distributed seismic network built from phone sensors. '
+                  'Run this device as a sensing node, or open the console to watch the network.',
+                  style: Ds.bodyDim,
+                ),
+                const SizedBox(height: Ds.s6),
+                _RoleCard(
+                  icon: Icons.sensors,
+                  title: 'Run as a node',
+                  body: 'Uses this device\'s accelerometer, gyroscope and compass to watch for ground '
+                      'movement and report what it detects.',
+                  accent: Ds.trace,
+                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const NodeScreen())),
+                ),
+                const SizedBox(height: Ds.s3),
+                _RoleCard(
+                  icon: Icons.desktop_windows_outlined,
+                  title: 'Open the console',
+                  body: 'Live map, active events and node health across the whole network. Sign-in required.',
+                  accent: Ds.nominal,
+                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HubLoginScreen())),
+                ),
+              ],
             ),
-            ElevatedButton.icon(
-              icon: const Icon(Icons.analytics),
-              label: const Text('DIAGNOSTIC HUB'),
-              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const HubLoginScreen())),
-            ),
-          ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RoleCard extends StatefulWidget {
+  final IconData icon;
+  final String title;
+  final String body;
+  final Color accent;
+  final VoidCallback onTap;
+  const _RoleCard({
+    required this.icon,
+    required this.title,
+    required this.body,
+    required this.accent,
+    required this.onTap,
+  });
+
+  @override
+  State<_RoleCard> createState() => _RoleCardState();
+}
+
+class _RoleCardState extends State<_RoleCard> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          padding: const EdgeInsets.all(Ds.s4),
+          decoration: BoxDecoration(
+            color: _hover ? Ds.panelRaised : Ds.panel,
+            border: Border.all(color: _hover ? widget.accent.withValues(alpha: 0.6) : Ds.hairline),
+            borderRadius: BorderRadius.circular(Ds.rPanel),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: widget.accent.withValues(alpha: 0.12),
+                  border: Border.all(color: widget.accent.withValues(alpha: 0.4)),
+                  borderRadius: BorderRadius.circular(Ds.rPanel),
+                ),
+                child: Icon(widget.icon, color: widget.accent, size: 19),
+              ),
+              const SizedBox(width: Ds.s4),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(widget.title, style: Ds.title),
+                    const SizedBox(height: Ds.s1),
+                    Text(widget.body, style: Ds.bodyDim),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -281,8 +376,13 @@ class _HubLoginScreenState extends State<HubLoginScreen> {
     } on FirebaseAuthException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.message ?? "Authentication failed", style: const TextStyle(color: Colors.white)),
-          backgroundColor: Colors.redAccent,
+          content: Text(e.message ?? 'Sign-in failed. Check the email and password.', style: Ds.body),
+          backgroundColor: Ds.panelRaised,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            side: const BorderSide(color: Ds.alert),
+            borderRadius: BorderRadius.circular(Ds.rPanel),
+          ),
         ));
       }
     } finally {
@@ -300,45 +400,70 @@ class _HubLoginScreenState extends State<HubLoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Hub Authentication")),
       body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(32.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.admin_panel_settings, size: 80, color: Colors.purpleAccent),
-              const SizedBox(height: 32),
-              TextField(
-                controller: _emailCtrl,
-                decoration: const InputDecoration(labelText: 'Email', border: OutlineInputBorder()),
-                keyboardType: TextInputType.emailAddress,
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _passCtrl,
-                decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder()),
-                obscureText: true,
-              ),
-              const SizedBox(height: 32),
-              if (_isLoading)
-                const CircularProgressIndicator(color: Colors.purpleAccent)
-              else
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    TextButton(
-                      onPressed: () => _authenticate(isLogin: false),
-                      child: const Text("Register", style: TextStyle(color: Colors.grey)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(Ds.s5),
+            child: InstrumentPanel(
+              label: 'Console sign-in',
+              padding: const EdgeInsets.all(Ds.s5),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('Sign in to watch the network', style: Ds.title),
+                  const SizedBox(height: Ds.s1),
+                  Text('Nodes report anonymously; the console needs an account.', style: Ds.bodyDim),
+                  const SizedBox(height: Ds.s5),
+                  TextField(
+                    controller: _emailCtrl,
+                    decoration: const InputDecoration(labelText: 'Email'),
+                    keyboardType: TextInputType.emailAddress,
+                    style: Ds.body,
+                  ),
+                  const SizedBox(height: Ds.s3),
+                  TextField(
+                    controller: _passCtrl,
+                    decoration: const InputDecoration(labelText: 'Password'),
+                    obscureText: true,
+                    style: Ds.body,
+                    onSubmitted: (_) => _isLoading ? null : _authenticate(isLogin: true),
+                  ),
+                  const SizedBox(height: Ds.s5),
+                  if (_isLoading)
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(vertical: Ds.s2),
+                        child: SizedBox(
+                          width: 18, height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Ds.nominal),
+                        ),
+                      ),
+                    )
+                  else
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: () => _authenticate(isLogin: true),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Ds.nominal.withValues(alpha: 0.16),
+                              foregroundColor: Ds.nominal,
+                            ),
+                            child: const Text('Sign in'),
+                          ),
+                        ),
+                        const SizedBox(width: Ds.s3),
+                        TextButton(
+                          onPressed: () => _authenticate(isLogin: false),
+                          child: const Text('Create account'),
+                        ),
+                      ],
                     ),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.purpleAccent, foregroundColor: Colors.white),
-                      onPressed: () => _authenticate(isLogin: true),
-                      child: const Text("Secure Login"),
-                    ),
-                  ],
-                )
-            ],
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -372,6 +497,15 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
   SurfaceType _surfaceType = SurfaceType.unknown;
   ChannelDominanceState? _lastChannelState;
   bool _showThrottleBanner = false;
+
+  // Local ring buffer so the node can draw its own live trace instead of
+  // only shipping magnitudes off to the console. Fixed length + rolling
+  // head so there is no per-frame list allocation.
+  static const int _localTraceLength = 120;
+  final List<double> _localTrace = List.filled(_localTraceLength, 0.0);
+  int _localTraceHead = 0;
+  DateTime? _lastTriggerAt;
+  int _triggerCount = 0;
 
   StreamSubscription? _calibSub;
   StreamSubscription? _waveSub;
@@ -489,6 +623,7 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
           amplitude: trigger.amplitude,
           azimuthDegrees: trigger.azimuthDegrees,
           azimuthUncertaintyDegrees: trigger.azimuthUncertaintyDegrees,
+          azimuthResolved: trigger.azimuthResolved,
           apparentVelocityMps: trigger.apparentVelocityMps,
           sMinusPSeconds: trigger.sMinusPSeconds,
           channelState: trigger.channelState,
@@ -500,6 +635,8 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
         setState(() {
           _lastChannelState = trigger.channelState;
           _surfaceType = trigger.surfaceType;
+          _lastTriggerAt = DateTime.now();
+          _triggerCount++;
         });
 
         _database.set(observation.toJson());
@@ -581,6 +718,10 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
           'mag': _currentWaveMagnitude,
           'ts': DateTime.now().millisecondsSinceEpoch,
         });
+        setState(() {
+          _localTrace[_localTraceHead] = _currentWaveMagnitude;
+          _localTraceHead = (_localTraceHead + 1) % _localTraceLength;
+        });
       }
     });
   }
@@ -648,84 +789,281 @@ class _NodeScreenState extends State<NodeScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  // -- Node UI ---------------------------------------------------------
+
+  Color get _stateColor {
+    if (_isDisabled) return Ds.alert;
+    if (!_isStreaming) return Ds.inert;
+    if (_isCalibrating) return Ds.caution;
+    return Ds.nominal;
+  }
+
+  String get _stateLabel {
+    if (_isDisabled) return 'Disabled from console';
+    if (!_isStreaming) return 'Standby';
+    if (_isCalibrating) return 'Calibrating';
+    return 'Watching';
+  }
+
+  String get _stateExplanation {
+    if (_isDisabled) return 'An operator turned this node off. It will not report until re-enabled.';
+    if (!_isStreaming) return 'Sensors are idle. Start reporting to join the network.';
+    if (_isCalibrating) return 'Learning the background vibration here so real movement stands out from it.';
+    return 'Reporting to the network. Leave the device still on its surface.';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Node Tuner ($nodeID)')),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
+      appBar: AppBar(
+        titleSpacing: Ds.s4,
+        title: Row(
           children: [
-            Text(
-              "GPS Locked: ${_currentLocation.latitude.toStringAsFixed(4)}, ${_currentLocation.longitude.toStringAsFixed(4)}", 
-              style: const TextStyle(color: Colors.greenAccent),
-            ),
-            const SizedBox(height: 20),
-
-            if (_showThrottleBanner)
-              Card(
-                color: Colors.amber.withValues(alpha: 0.15),
-                child: Padding(
-                  padding: const EdgeInsets.all(12.0),
-                  child: Column(
-                    children: [
-                      const Text(
-                        "Background battery optimization may throttle sensor sampling during long sessions.",
-                        style: TextStyle(color: Colors.amberAccent),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 8),
-                      ElevatedButton(
-                        onPressed: () async {
-                          await ThrottleMitigationService.requestMitigation();
-                          _maybePromptThrottleMitigation();
-                        },
-                        child: const Text('Fix in Settings'),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-            if (_isDisabled)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 20.0),
-                child: Text(
-                  "This node has been disabled", 
-                  style: TextStyle(color: Colors.redAccent, fontSize: 18, fontWeight: FontWeight.bold)
-                ),
-              ),
-
-            if (_isCalibrating && _isStreaming) ...[
-              LinearProgressIndicator(value: _calibrationProgress),
-              const SizedBox(height: 10),
-              const Text("Learning Ambient Noise..."),
-            ] else ...[
-              Icon(
-                _isDisabled ? Icons.block : Icons.radar, 
-                size: 60, 
-                color: _isDisabled ? Colors.redAccent : (_isStreaming ? Colors.greenAccent : Colors.grey)
-              ),
-            ],
-            const SizedBox(height: 40),
-            
-            Text("Remote Sensitivity: ${_pollingService.sensitivityMultiplier.toStringAsFixed(2)}x", style: const TextStyle(color: Colors.grey)),
-            const SizedBox(height: 8),
-            Text(
-              "Surface: ${_surfaceType.name}  •  Channels: ${_lastChannelState == null ? 'accelerometer only so far' : _lastChannelState!.name}",
-              style: const TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold),
-              textAlign: TextAlign.center,
-            ),
-            
-            const SizedBox(height: 40),
-            SwitchListTile(
-              title: const Text('Transmit Telemetry'),
-              value: _isStreaming,
-              activeThumbColor: Colors.greenAccent, 
-              onChanged: _isDisabled ? null : _toggleStreaming,
-            ),
+            StatusDot(_stateColor, size: 8),
+            const SizedBox(width: Ds.s3),
+            Text('Node', style: Ds.title),
+            const SizedBox(width: Ds.s2),
+            Text(nodeID, style: Ds.mono(size: 12, color: Ds.inkMuted)),
           ],
         ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: Ds.s4),
+            child: Center(child: Text(_stateLabel, style: Ds.mono(size: 12, color: _stateColor))),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(Ds.s4),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_showThrottleBanner) ...[
+                    _NoticeBar(
+                      color: Ds.caution,
+                      icon: Icons.battery_alert_outlined,
+                      message: 'Battery optimisation can throttle sensor sampling during long sessions.',
+                      actionLabel: 'Open settings',
+                      onAction: () async {
+                        await ThrottleMitigationService.requestMitigation();
+                        _maybePromptThrottleMitigation();
+                      },
+                    ),
+                    const SizedBox(height: Ds.s3),
+                  ],
+                  if (_isDisabled) ...[
+                    const _NoticeBar(
+                      color: Ds.alert,
+                      icon: Icons.block,
+                      message: 'This node was disabled from the console. It will not report until re-enabled.',
+                    ),
+                    const SizedBox(height: Ds.s3),
+                  ],
+
+                  InstrumentPanel(
+                    label: 'Status',
+                    accent: _isStreaming && !_isDisabled ? _stateColor : null,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 46,
+                              height: 46,
+                              decoration: BoxDecoration(
+                                color: _stateColor.withValues(alpha: 0.12),
+                                border: Border.all(color: _stateColor.withValues(alpha: 0.5)),
+                                borderRadius: BorderRadius.circular(Ds.rPanel),
+                              ),
+                              child: Icon(
+                                _isDisabled
+                                    ? Icons.block
+                                    : _isCalibrating
+                                        ? Icons.tune
+                                        : Icons.sensors,
+                                color: _stateColor,
+                                size: 22,
+                              ),
+                            ),
+                            const SizedBox(width: Ds.s4),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(_stateLabel, style: Ds.title.copyWith(color: _stateColor)),
+                                  const SizedBox(height: 2),
+                                  Text(_stateExplanation, style: Ds.bodyDim),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (_isCalibrating && _isStreaming) ...[
+                          const SizedBox(height: Ds.s4),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(2),
+                            child: LinearProgressIndicator(value: _calibrationProgress.clamp(0.0, 1.0)),
+                          ),
+                          const SizedBox(height: Ds.s2),
+                          Text(
+                            '${(_calibrationProgress.clamp(0.0, 1.0) * 100).toStringAsFixed(0)}% complete',
+                            style: Ds.mono(size: 11.5, color: Ds.inkMuted),
+                          ),
+                        ],
+                        const SizedBox(height: Ds.s4),
+                        const PanelRule(),
+                        const SizedBox(height: Ds.s3),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                _isStreaming ? 'Reporting to network' : 'Not reporting',
+                                style: Ds.body,
+                              ),
+                            ),
+                            Switch(
+                              value: _isStreaming,
+                              onChanged: _isDisabled ? null : _toggleStreaming,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: Ds.s3),
+
+                  InstrumentPanel(
+                    label: 'Live motion',
+                    trailing: Text(
+                      _currentWaveMagnitude.toStringAsFixed(4),
+                      style: Ds.mono(size: 11, color: Ds.trace),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        TraceView(data: _localTrace, headIndex: _localTraceHead, height: 104),
+                        const SizedBox(height: Ds.s2),
+                        Text(
+                          'Filtered acceleration, gravity removed. Flat is good - spikes are what gets reported.',
+                          style: Ds.label,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: Ds.s3),
+
+                  InstrumentPanel(
+                    label: 'Sensing conditions',
+                    child: Wrap(
+                      spacing: Ds.s5,
+                      runSpacing: Ds.s4,
+                      children: [
+                        Readout(
+                          label: 'Resting surface',
+                          value: _surfaceType == SurfaceType.unknown ? null : _surfaceType.name,
+                          unresolvedNote: 'not classified yet',
+                          valueColor: _surfaceType == SurfaceType.soft ? Ds.caution : Ds.ink,
+                        ),
+                        Readout(
+                          label: 'Sensors in use',
+                          value: _lastChannelState == null
+                              ? null
+                              : (_lastChannelState == ChannelDominanceState.bothChannelsUsable
+                                  ? 'accel + gyro'
+                                  : 'accel only'),
+                          unresolvedNote: 'no movement yet',
+                        ),
+                        Readout(
+                          label: 'Detections',
+                          value: '$_triggerCount',
+                          uncertainty: null,
+                        ),
+                        Readout(
+                          label: 'Last detection',
+                          value: _lastTriggerAt == null
+                              ? null
+                              : '${DateTime.now().difference(_lastTriggerAt!).inSeconds}s ago',
+                          unresolvedNote: 'none this session',
+                        ),
+                        Readout(
+                          label: 'Sensitivity',
+                          value: _pollingService.sensitivityMultiplier.toStringAsFixed(2),
+                          unit: 'x',
+                        ),
+                        Readout(
+                          label: 'Position',
+                          value: '${_currentLocation.latitude.toStringAsFixed(3)}, '
+                              '${_currentLocation.longitude.toStringAsFixed(3)}',
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: Ds.s3),
+                  Text(
+                    _surfaceType == SurfaceType.soft
+                        ? 'Soft surfaces damp vibration, so readings from here are weighted lower. '
+                            'A hard flat surface gives the network better data.'
+                        : 'Keep the device still and flat. Picking it up registers as movement.',
+                    style: Ds.label,
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: Ds.s5),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Inline notice bar - states what happened and what to do about it,
+/// without apologising or going vague.
+class _NoticeBar extends StatelessWidget {
+  final Color color;
+  final IconData icon;
+  final String message;
+  final String? actionLabel;
+  final VoidCallback? onAction;
+
+  const _NoticeBar({
+    required this.color,
+    required this.icon,
+    required this.message,
+    this.actionLabel,
+    this.onAction,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: Ds.s3, vertical: Ds.s3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+        borderRadius: BorderRadius.circular(Ds.rPanel),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: Ds.s3),
+          Expanded(child: Text(message, style: Ds.body.copyWith(fontSize: 12.5))),
+          if (actionLabel != null) ...[
+            const SizedBox(width: Ds.s2),
+            TextButton(
+              onPressed: onAction,
+              style: TextButton.styleFrom(foregroundColor: color, padding: const EdgeInsets.symmetric(horizontal: Ds.s2)),
+              child: Text(actionLabel!),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -748,6 +1086,42 @@ class MapItemData {
     required this.type,
     required this.tooltipMessage,
   });
+}
+
+/// Reports hover (desktop/web) and tap (all platforms, notably touch,
+/// where hover never fires) up to whoever owns [isActive] - used to
+/// highlight a marker's uncertainty circle without the circle itself
+/// living inside this widget (it's drawn as a real CircleLayer on the map
+/// instead, so its radius can be a true geographic distance - see
+/// _buildUncertaintyCircle). Tap toggles; hover just tracks the pointer,
+/// and only clears the highlight if it's still the one that set it, so a
+/// mouse crossing directly from one icon to an adjacent one can't have the
+/// outgoing icon's exit wipe out the incoming icon's highlight.
+class _HoverTapTrigger extends StatelessWidget {
+  final Widget child;
+  final bool isActive;
+  final VoidCallback onActivate;
+  final VoidCallback onDeactivateIfActive;
+
+  const _HoverTapTrigger({
+    required this.child,
+    required this.isActive,
+    required this.onActivate,
+    required this.onDeactivateIfActive,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => onActivate(),
+      onExit: (_) => onDeactivateIfActive(),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => isActive ? onDeactivateIfActive() : onActivate(),
+        child: child,
+      ),
+    );
+  }
 }
 
 class HubScreen extends StatefulWidget {
@@ -789,6 +1163,13 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
   // every time the estimate updates.
   final Map<String, MapItemData> _epicenterMarkers = {};
   final Map<String, HypocentreEstimate> _activeEstimates = {};
+  // Which disturbance icon (by event id) currently has its uncertainty
+  // circle shown - hovered on desktop/web, tapped on touch - and the
+  // CircleLayer entry _buildAllMarkers() computes for it, using the same
+  // render location (post-overlap-spread) as the marker itself so the
+  // circle is never a pixel off from the icon it belongs to.
+  String? _highlightedEpicenterId;
+  CircleMarker? _highlightedCircleMarker;
   List<Marker> _cachedMarkers = [];
   
   final MapController _mapController = MapController();
@@ -816,6 +1197,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
 
     _hypocentreService = HubHypocentreService();
     unawaited(_hypocentreService.start());
+    unawaited(AlertService.initialize());
     _estimateSub = _hypocentreService.onEstimateUpdate.listen(_handleEstimateUpdate);
     _eventExpiredSub = _hypocentreService.onEventExpired.listen((eventId) {
       if (mounted) {
@@ -1068,14 +1450,14 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              backgroundColor: const Color(0xFF16161F),
+              backgroundColor: Ds.panel,
               shape: RoundedRectangleBorder(
                 side: const BorderSide(color: Colors.white10),
                 borderRadius: BorderRadius.circular(12),
               ),
               title: const Row(
                 children: [
-                  Icon(Icons.delete_sweep, color: Colors.redAccent),
+                  Icon(Icons.delete_sweep_outlined, color: Ds.alert),
                   SizedBox(width: 10),
                   Text("Clear History", style: TextStyle(color: Colors.white)),
                 ],
@@ -1097,7 +1479,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
                       border: OutlineInputBorder(),
                       contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       labelText: "Time Period",
-                      labelStyle: TextStyle(color: Colors.purpleAccent),
+                      labelStyle: TextStyle(color: Ds.inkDim),
                     ),
                     items: const [
                       DropdownMenuItem(value: '24_hours', child: Text("Older than 24 Hours")),
@@ -1116,10 +1498,10 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text("CANCEL", style: TextStyle(color: Colors.grey)),
+                  child: const Text('Cancel'),
                 ),
                 ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                  style: ElevatedButton.styleFrom(backgroundColor: Ds.alert.withValues(alpha: 0.18), foregroundColor: Ds.alert),
                   onPressed: () {
                     Navigator.of(dialogContext).pop();
                     if (mounted) _showConfirmationDialog(context, selectedRange);
@@ -1204,14 +1586,14 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
       context: context,
       builder: (BuildContext confirmContext) {
         return AlertDialog(
-          backgroundColor: const Color(0xFF16161F),
+          backgroundColor: Ds.panel,
           shape: RoundedRectangleBorder(
-            side: const BorderSide(color: Colors.redAccent, width: 1.5),
+            side: const BorderSide(color: Ds.alert, width: 1.5),
             borderRadius: BorderRadius.circular(12),
           ),
           title: const Row(
             children: [
-              Icon(Icons.warning_amber_rounded, color: Colors.orangeAccent),
+              Icon(Icons.warning_amber_rounded, color: Ds.caution),
               SizedBox(width: 10),
               Text("Confirm Deletion", style: TextStyle(color: Colors.white)),
             ],
@@ -1223,7 +1605,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
           actions: [
             TextButton(
               onPressed: () => Navigator.of(confirmContext).pop(),
-              child: const Text("CANCEL", style: TextStyle(color: Colors.grey)),
+              child: const Text('Cancel'),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
@@ -1280,7 +1662,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text("Error clearing history: $e"),
-            backgroundColor: Colors.redAccent,
+            backgroundColor: Ds.panelRaised,
           ),
         );
       }
@@ -1384,6 +1766,14 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
         debugPrint("Failed to move MapController: $e");
       }
     }
+
+    if (update.isNewEvent) {
+      unawaited(AlertService.raiseDisturbanceAlert(
+        methodLabel: update.methodLabel,
+        latitude: update.latitude,
+        longitude: update.longitude,
+      ));
+    }
   }
 
   List<Marker> _buildAllMarkers() {
@@ -1424,9 +1814,13 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
     }
 
     List<Marker> finalMarkers = [];
+    CircleMarker? highlightedCircle;
     for (var group in grid.values) {
       if (group.length == 1) {
         finalMarkers.add(_buildMarkerFromData(group.first, group.first.loc));
+        if (group.first.id == _highlightedEpicenterId) {
+          highlightedCircle = _buildUncertaintyCircle(group.first, group.first.loc) ?? highlightedCircle;
+        }
       } else {
         double radiusDegrees = 0.00015 + (group.length * 0.000015); 
         double sumLat = 0.0;
@@ -1446,11 +1840,33 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
           
           LatLng spreadLoc = LatLng(centerLat + latOffset, centerLng + lngOffset);
           finalMarkers.add(_buildMarkerFromData(group[i], spreadLoc));
+          if (group[i].id == _highlightedEpicenterId) {
+            highlightedCircle = _buildUncertaintyCircle(group[i], spreadLoc) ?? highlightedCircle;
+          }
         }
       }
     }
 
+    _highlightedCircleMarker = highlightedCircle;
     return finalMarkers;
+  }
+
+  /// The circle radius is the actual horizontal uncertainty of that
+  /// specific hypocentre estimate, in real-world meters - not a fixed
+  /// on-screen size - so it shrinks and grows across zoom levels the way
+  /// a real distance should, and a wide, unresolved estimate visibly reads
+  /// as less certain than a tightly-constrained one.
+  CircleMarker? _buildUncertaintyCircle(MapItemData data, LatLng renderLoc) {
+    final est = _activeEstimates[data.id];
+    if (est == null) return null;
+    return CircleMarker(
+      point: renderLoc,
+      radius: math.max(est.horizontalUncertaintyMeters, 50.0),
+      useRadiusInMeter: true,
+      color: Ds.alert.withValues(alpha: 0.15),
+      borderColor: Ds.alert.withValues(alpha: 0.6),
+      borderStrokeWidth: 1.5,
+    );
   }
 
   Marker _buildMarkerFromData(MapItemData data, LatLng renderLoc) {
@@ -1459,20 +1875,29 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
       case MapItemType.hub:
         iconWidget = Tooltip(
           message: data.tooltipMessage,
-          child: const Icon(Icons.hub, color: Colors.purpleAccent, size: 40),
+          child: const Icon(Icons.hub, color: Ds.research, size: 34),
         );
         break;
       case MapItemType.node:
         bool isDisabled = _disabledNodes[data.id] ?? false;
         iconWidget = Tooltip(
           message: data.tooltipMessage,
-          child: Icon(isDisabled ? Icons.cell_tower_outlined : Icons.cell_tower, color: isDisabled ? Colors.redAccent : Colors.blueAccent, size: 35),
+          child: Icon(isDisabled ? Icons.cell_tower_outlined : Icons.cell_tower, color: isDisabled ? Ds.alert : Ds.trace, size: 30),
         );
         break;
       case MapItemType.epicenter:
-        iconWidget = Tooltip(
-          message: data.tooltipMessage,
-          child: const Icon(Icons.crisis_alert, color: Colors.redAccent, size: 40),
+        iconWidget = _HoverTapTrigger(
+          isActive: _highlightedEpicenterId == data.id,
+          onActivate: () => setState(() => _highlightedEpicenterId = data.id),
+          onDeactivateIfActive: () {
+            if (_highlightedEpicenterId == data.id) {
+              setState(() => _highlightedEpicenterId = null);
+            }
+          },
+          child: Tooltip(
+            message: data.tooltipMessage,
+            child: const Icon(Icons.crisis_alert, color: Ds.alert, size: 36),
+          ),
         );
         break;
     }
@@ -1489,212 +1914,274 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
     showDialog(
       context: context,
       builder: (ctx) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF16161F),
-          title: const Text("Settings", style: TextStyle(color: Colors.white)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text("Tectonic Fidelity", style: TextStyle(color: Colors.white70)),
-                  DropdownButton<String>(
-                    dropdownColor: const Color(0xFF16161F),
-                    value: _tectonicResolution,
-                    items: ['low', 'medium', 'high']
-                        .map((s) => DropdownMenuItem(value: s, child: Text(s.toUpperCase(), style: const TextStyle(color: Colors.white))))
-                        .toList(),
-                    onChanged: (val) {
-                      if (val != null) {
-                        setState(() => _tectonicResolution = val);
-                        if (_isTectonicOverlayActive) {
-                          _reloadTectonicData();
-                        }
-                      }
-                      Navigator.pop(ctx);
-                    },
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480),
+            child: StatefulBuilder(
+              builder: (context, setModalState) {
+                return InstrumentPanel(
+                  label: 'Network settings',
+                  padding: const EdgeInsets.all(Ds.s4),
+                  scrollable: true,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('Plate boundary detail', style: Ds.title),
+                      const SizedBox(height: Ds.s1),
+                      Text(
+                        'Higher detail draws more of the boundary geometry, at some cost to map smoothness.',
+                        style: Ds.bodyDim,
+                      ),
+                      const SizedBox(height: Ds.s3),
+                      Row(
+                        children: [
+                          for (final level in const ['low', 'medium', 'high'])
+                            Padding(
+                              padding: const EdgeInsets.only(right: Ds.s2),
+                              child: OutlinedButton(
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: _tectonicResolution == level ? Ds.nominal : Ds.inkDim,
+                                  side: BorderSide(
+                                    color: _tectonicResolution == level ? Ds.nominal : Ds.hairline,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(horizontal: Ds.s3, vertical: Ds.s2),
+                                  minimumSize: Size.zero,
+                                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Ds.rPanel)),
+                                ),
+                                onPressed: () {
+                                  setModalState(() => _tectonicResolution = level);
+                                  setState(() => _tectonicResolution = level);
+                                  if (_isTectonicOverlayActive) _reloadTectonicData();
+                                },
+                                child: Text(level, style: Ds.mono(size: 11.5)),
+                              ),
+                            ),
+                        ],
+                      ),
+
+                      const SizedBox(height: Ds.s5),
+                      const PanelRule(),
+                      const SizedBox(height: Ds.s4),
+
+                      Text('Background filtering', style: Ds.title),
+                      const SizedBox(height: Ds.s1),
+                      Text(
+                        'How aggressively nodes strip slow drift out of their accelerometer signal. '
+                        'Higher keeps more of the fast movement that matters.',
+                        style: Ds.bodyDim,
+                      ),
+                      const SizedBox(height: Ds.s2),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Slider(
+                              value: _globalHpfAlpha,
+                              min: 0.0,
+                              max: 1.0,
+                              divisions: 100,
+                              label: _globalHpfAlpha.toStringAsFixed(2),
+                              onChanged: (val) {
+                                setModalState(() => _globalHpfAlpha = val);
+                                setState(() => _globalHpfAlpha = val);
+                                FirebaseDatabase.instance.ref('global_settings/hpf_alpha').set(val);
+                              },
+                            ),
+                          ),
+                          SizedBox(
+                            width: 44,
+                            child: Text(_globalHpfAlpha.toStringAsFixed(2),
+                                style: Ds.mono(size: 12.5, weight: FontWeight.w600)),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              setModalState(() => _globalHpfAlpha = 0.9);
+                              setState(() => _globalHpfAlpha = 0.9);
+                              FirebaseDatabase.instance.ref('global_settings/hpf_alpha').set(0.9);
+                            },
+                            child: const Text('Reset'),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: Ds.s4),
+                      Text('Magnetic declination', style: Ds.title),
+                      const SizedBox(height: Ds.s1),
+                      Text(
+                        'Corrects compass bearings to true north. Look up the value for your region '
+                        'and set it once - it applies to every node.',
+                        style: Ds.bodyDim,
+                      ),
+                      const SizedBox(height: Ds.s2),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Slider(
+                              value: _globalDeclinationDeg,
+                              min: -30.0,
+                              max: 30.0,
+                              divisions: 120,
+                              label: _globalDeclinationDeg.toStringAsFixed(1),
+                              onChanged: (val) {
+                                setModalState(() => _globalDeclinationDeg = val);
+                                setState(() => _globalDeclinationDeg = val);
+                                FirebaseDatabase.instance
+                                    .ref('global_settings/magnetic_declination_deg')
+                                    .set(val);
+                              },
+                            ),
+                          ),
+                          SizedBox(
+                            width: 44,
+                            child: Text('${_globalDeclinationDeg.toStringAsFixed(1)}°',
+                                style: Ds.mono(size: 12.5, weight: FontWeight.w600)),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              setModalState(() => _globalDeclinationDeg = 0.0);
+                              setState(() => _globalDeclinationDeg = 0.0);
+                              FirebaseDatabase.instance
+                                  .ref('global_settings/magnetic_declination_deg')
+                                  .set(0.0);
+                            },
+                            child: const Text('Reset'),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: Ds.s5),
+                      const PanelRule(),
+                      const SizedBox(height: Ds.s3),
+                      Text(
+                        'Per-node sensitivity and surface settings are on each node in the Nodes panel.',
+                        style: Ds.label,
+                      ),
+                      const SizedBox(height: Ds.s3),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: ElevatedButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text('Done'),
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              const Text("HPF Aggressiveness", style: TextStyle(color: Colors.white70, fontSize: 14)),
-              StatefulBuilder(
-                builder: (context, setModalState) {
-                  return Row(
-                    children: [
-                      Expanded(
-                        child: Slider(
-                          value: _globalHpfAlpha,
-                          min: 0.0,
-                          max: 1.0,
-                          divisions: 100,
-                          label: _globalHpfAlpha.toStringAsFixed(2),
-                          activeColor: Colors.purpleAccent,
-                          onChanged: (val) {
-                            setModalState(() => _globalHpfAlpha = val);
-                            setState(() => _globalHpfAlpha = val);
-                            FirebaseDatabase.instance.ref('global_settings/hpf_alpha').set(val);
-                          },
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          setModalState(() => _globalHpfAlpha = 0.9);
-                          setState(() => _globalHpfAlpha = 0.9);
-                          FirebaseDatabase.instance.ref('global_settings/hpf_alpha').set(0.9);
-                        },
-                        child: const Text("Reset", style: TextStyle(color: Colors.redAccent)),
-                      ),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 20),
-              const Text("Magnetic Declination (deg)", style: TextStyle(color: Colors.white70, fontSize: 14)),
-              const Text(
-                "Look up your region's declination once and set it here - a single regional constant, not a per-node model. See ARCHITECTURE.md.",
-                style: TextStyle(color: Colors.grey, fontSize: 11),
-              ),
-              StatefulBuilder(
-                builder: (context, setModalState) {
-                  return Row(
-                    children: [
-                      Expanded(
-                        child: Slider(
-                          value: _globalDeclinationDeg,
-                          min: -30.0,
-                          max: 30.0,
-                          divisions: 120,
-                          label: _globalDeclinationDeg.toStringAsFixed(1),
-                          activeColor: Colors.purpleAccent,
-                          onChanged: (val) {
-                            setModalState(() => _globalDeclinationDeg = val);
-                            setState(() => _globalDeclinationDeg = val);
-                            FirebaseDatabase.instance.ref('global_settings/magnetic_declination_deg').set(val);
-                          },
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          setModalState(() => _globalDeclinationDeg = 0.0);
-                          setState(() => _globalDeclinationDeg = 0.0);
-                          FirebaseDatabase.instance.ref('global_settings/magnetic_declination_deg').set(0.0);
-                        },
-                        child: const Text("Reset", style: TextStyle(color: Colors.redAccent)),
-                      ),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 20),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.tune),
-                label: const Text("Node sensitivity..."),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blueAccent,
-                  foregroundColor: Colors.white,
-                ),
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _showNodeSensitivityDialog();
-                },
-              )
-            ],
+                );
+              },
+            ),
           ),
         );
-      }
+      },
     );
   }
 
-  void _showNodeSensitivityDialog() {
-    List<String> nodeKeys = _activeNodes.keys.toList();
-    
+  void _showNodeSettings(String nodeId) {
     showDialog(
       context: context,
       builder: (ctx) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF16161F),
-          title: const Text("Node Sensitivities", style: TextStyle(color: Colors.white)),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: nodeKeys.isEmpty 
-              ? const Text("No active nodes available.", style: TextStyle(color: Colors.grey))
-              : ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: nodeKeys.length,
-                  itemBuilder: (context, index) {
-                    String nodeId = nodeKeys[index];
-                    return StatefulBuilder(
-                      builder: (context, setModalState) {
-                        double currentVal = _nodeSensitivities[nodeId] ?? 1.0;
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(nodeId, style: const TextStyle(color: Colors.blueAccent, fontWeight: FontWeight.bold)),
-                            Row(
-                              children: [
-                                const Text("0.1", style: TextStyle(fontSize: 10, color: Colors.grey)),
-                                Expanded(
-                                  child: Slider(
-                                    value: currentVal,
-                                    min: 0.1, max: 3.0, divisions: 29,
-                                    label: currentVal.toStringAsFixed(1),
-                                    activeColor: Colors.amber,
-                                    onChanged: (val) {
-                                      setModalState(() => currentVal = val);
-                                      FirebaseDatabase.instance.ref('node_settings/$nodeId/sensitivity').set(val);
-                                    },
-                                  ),
-                                ),
-                                const Text("3.0", style: TextStyle(fontSize: 10, color: Colors.grey)),
-                                const SizedBox(width: 8),
-                                TextButton(
-                                  onPressed: () {
-                                    setModalState(() => currentVal = 1.00);
-                                    FirebaseDatabase.instance.ref('node_settings/$nodeId/sensitivity').set(1.00);
-                                  },
-                                  child: const Text("Reset", style: TextStyle(color: Colors.redAccent)),
-                                ),
-                              ],
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final current = _nodeSensitivities[nodeId] ?? 1.0;
+            return Dialog(
+              backgroundColor: Colors.transparent,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 400),
+                child: InstrumentPanel(
+                  label: 'Node $nodeId',
+                  padding: const EdgeInsets.all(Ds.s4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('Trigger sensitivity', style: Ds.title),
+                      const SizedBox(height: Ds.s1),
+                      Text(
+                        'Higher values make this node report smaller movements. '
+                        'Too high and ordinary footsteps get reported.',
+                        style: Ds.bodyDim,
+                      ),
+                      const SizedBox(height: Ds.s3),
+                      Row(
+                        children: [
+                          Text('0.1', style: Ds.mono(size: 10.5, color: Ds.inkMuted)),
+                          Expanded(
+                            child: Slider(
+                              value: current,
+                              min: 0.1,
+                              max: 3.0,
+                              divisions: 29,
+                              label: current.toStringAsFixed(2),
+                              onChanged: (val) {
+                                setModalState(() => _nodeSensitivities[nodeId] = val);
+                                setState(() {});
+                                FirebaseDatabase.instance.ref('node_settings/$nodeId/sensitivity').set(val);
+                              },
                             ),
-                            Row(
-                              children: [
-                                const Text("Surface:", style: TextStyle(fontSize: 11, color: Colors.grey)),
-                                const SizedBox(width: 8),
-                                for (final option in const ['unknown', 'hard', 'soft'])
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 6.0),
-                                    child: OutlinedButton(
-                                      style: OutlinedButton.styleFrom(
-                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                        minimumSize: Size.zero,
-                                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                      ),
-                                      onPressed: () {
-                                        FirebaseDatabase.instance.ref('node_settings/$nodeId/surface_override').set(option);
-                                      },
-                                      child: Text(option == 'unknown' ? 'Auto' : option, style: const TextStyle(fontSize: 11)),
-                                    ),
-                                  ),
-                              ],
+                          ),
+                          Text('3.0', style: Ds.mono(size: 10.5, color: Ds.inkMuted)),
+                          const SizedBox(width: Ds.s2),
+                          Text(current.toStringAsFixed(2), style: Ds.mono(size: 13, weight: FontWeight.w600)),
+                        ],
+                      ),
+                      const SizedBox(height: Ds.s4),
+                      const PanelRule(),
+                      const SizedBox(height: Ds.s4),
+                      Text('Resting surface', style: Ds.title),
+                      const SizedBox(height: Ds.s1),
+                      Text(
+                        'The node guesses this from background vibration. Override it if the guess is wrong.',
+                        style: Ds.bodyDim,
+                      ),
+                      const SizedBox(height: Ds.s3),
+                      Row(
+                        children: [
+                          for (final option in const ['unknown', 'hard', 'soft'])
+                            Padding(
+                              padding: const EdgeInsets.only(right: Ds.s2),
+                              child: OutlinedButton(
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: Ds.inkDim,
+                                  side: const BorderSide(color: Ds.hairline),
+                                  padding: const EdgeInsets.symmetric(horizontal: Ds.s3, vertical: Ds.s2),
+                                  minimumSize: Size.zero,
+                                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Ds.rPanel)),
+                                ),
+                                onPressed: () {
+                                  FirebaseDatabase.instance
+                                      .ref('node_settings/$nodeId/surface_override')
+                                      .set(option);
+                                },
+                                child: Text(
+                                  option == 'unknown' ? 'Auto-detect' : option,
+                                  style: Ds.mono(size: 11.5, color: Ds.inkDim),
+                                ),
+                              ),
                             ),
-                          ],
-                        );
-                      }
-                    );
-                  }
+                        ],
+                      ),
+                      const SizedBox(height: Ds.s5),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: () {
+                            setModalState(() => _nodeSensitivities[nodeId] = 1.0);
+                            setState(() {});
+                            FirebaseDatabase.instance.ref('node_settings/$nodeId/sensitivity').set(1.0);
+                          },
+                          child: const Text('Reset sensitivity'),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Close", style: TextStyle(color: Colors.white)),
-            )
-          ],
+              ),
+            );
+          },
         );
-      }
+      },
     );
   }
 
@@ -1740,569 +2227,818 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
     super.dispose();
   }
 
+  // ====================================================================
+  // CONSOLE LAYOUT
+  //
+  // Desktop-first balanced dashboard. Wide: events | map+trace | nodes,
+  // all visible at once. Medium: drops the node rail into the left
+  // column. Narrow: falls back to tabs, since three columns on a phone
+  // would be three unreadable slivers.
+  // ====================================================================
+
+  int _activeNodeCount() => _activeNodes.keys.where((id) => !(_disabledNodes[id] ?? false)).length;
+
+  Color get _networkHealthColor {
+    if (_activeNodes.isEmpty) return Ds.inert;
+    if (_activeEstimates.isNotEmpty) return Ds.alert;
+    if (_activeNodeCount() < _activeNodes.length) return Ds.caution;
+    return Ds.nominal;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 3,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text("DIAGNOSTIC HUB (${_hubId.toUpperCase()})"),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.logout),
-              tooltip: 'Sign Out',
-              onPressed: () async {
-                await FirebaseAuth.instance.signOut();
-                if (!context.mounted) return;
-                Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const RoleSelectionScreen()));
-              },
-            ),
-            IconButton(
-              icon: const Icon(Icons.settings),
-              tooltip: 'Settings',
-              onPressed: _showSettingsMenu,
-            )
-          ],
-          bottom: const TabBar(
-            tabs: [
-              Tab(icon: Icon(Icons.speed), text: "NETWORK TELEMETRY"),
-              Tab(icon: Icon(Icons.map), text: "GEOSPATIAL MAP"),
-              Tab(icon: Icon(Icons.history), text: "EVENT HISTORY"),
-            ],
-          ),
-        ),
-        body: TabBarView(
-          physics: const NeverScrollableScrollPhysics(),
-          children: [
-            _buildTelemetryTab(),
-            _buildMapTab(),
-            _buildHistoryTab(),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTelemetryTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16.0),
-      child: RepaintBoundary(
+    return Scaffold(
+      body: SafeArea(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text("SUMMARY", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: 2.0)),
-            const SizedBox(height: 8),
-            Card(
-              shape: RoundedRectangleBorder(side: const BorderSide(color: Colors.purpleAccent, width: 1.5), borderRadius: BorderRadius.circular(8)),
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Text("PEAK NETWORK KINETIC STREAM", style: TextStyle(letterSpacing: 1.5, color: Colors.grey)),
-                    const SizedBox(height: 10),
-                    Container(
-                      height: 120,
-                      decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
-                      child: AnimatedBuilder(
-                        animation: _waveAnimationController,
-                        builder: (context, child) {
-                          return CustomPaint(painter: LiveStreamPainter(_telemetryState.networkPeakWaveform, _telemetryState.headIndex));
-                        }
-                      ),
-                    ),
-                  ],
-                ),
+            _buildStatusRail(),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  if (constraints.maxWidth >= Ds.wide) return _buildWideConsole();
+                  if (constraints.maxWidth >= Ds.medium) return _buildMediumConsole();
+                  return _buildNarrowConsole();
+                },
               ),
             ),
-            
-            const SizedBox(height: 24),
-            const Divider(color: Colors.white24),
-            const SizedBox(height: 16),
-
-            Text("${_activeEstimates.length} ACTIVE EVENT(S)", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: 2.0)),
-            const SizedBox(height: 16),
-            if (_activeEstimates.isEmpty)
-              const Center(child: Text("No events associated yet.", style: TextStyle(color: Colors.grey))),
-            ..._activeEstimates.entries.map((entry) {
-              final est = entry.value;
-              final depthStr = est.depthMeters != null
-                  ? "${(est.depthMeters! / 1000.0).toStringAsFixed(1)} km deep"
-                  : "depth unresolved";
-              return Card(
-                margin: const EdgeInsets.only(bottom: 8.0),
-                color: const Color(0xFF16161F),
-                shape: RoundedRectangleBorder(
-                  side: BorderSide(color: est.maturity == MethodMaturity.exotic ? Colors.amberAccent : Colors.white10),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: ListTile(
-                  leading: const Icon(Icons.crisis_alert, color: Colors.redAccent),
-                  title: Text(est.methodLabel, style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text(
-                    "${est.latitude.toStringAsFixed(4)}, ${est.longitude.toStringAsFixed(4)} - $depthStr\n"
-                    "${est.associatedNodeIds.length} node(s) - ±${(est.horizontalUncertaintyMeters / 1000.0).toStringAsFixed(1)} km",
-                  ),
-                  isThreeLine: true,
-                  trailing: est.maturity == MethodMaturity.exotic
-                      ? const Tooltip(message: "Research-level method", child: Icon(Icons.science, color: Colors.amberAccent))
-                      : null,
-                ),
-              );
-            }),
-
-            const SizedBox(height: 24),
-            const Divider(color: Colors.white24),
-            const SizedBox(height: 16),
-            
-            Text("${_activeNodes.length} ACTIVE NODES", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: 2.0)),
-            const SizedBox(height: 16),
-            if (_activeNodes.isEmpty)
-              const Center(child: Text("Waiting for nodes to connect...", style: TextStyle(color: Colors.grey))),
-            
-            ..._activeNodes.keys.map((nodeId) => _buildNodeCard(nodeId)),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildNodeCard(String nodeId) {
-    final latestEvent = _nodeLatestEvents[nodeId];
-    final location = _activeNodes[nodeId];
-    
-    final double? angle = (latestEvent?['azimuth_true_deg'] as num?)?.toDouble();
-    final double? apparentVelocity = (latestEvent?['apparent_velocity_mps'] as num?)?.toDouble();
-    final String channelState = latestEvent?['channel_state']?.toString() ?? 'accelerometerDominant';
-    final bool accelSaturated = latestEvent?['accel_saturated'] == true;
-    final String surfaceType = latestEvent?['surface_type']?.toString() ?? 'unknown';
-    bool bothChannels = accelSaturated || channelState == 'bothChannelsUsable';
-    String latStr = location != null ? location.latitude.toStringAsFixed(4) : "Awaiting Lock";
-    String lngStr = location != null ? location.longitude.toStringAsFixed(4) : "Awaiting Lock";
-    
-    bool hasEvent = latestEvent != null;
-    bool isDisabled = _disabledNodes[nodeId] ?? false;
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 16.0),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            bool isNarrow = constraints.maxWidth < 400;
-            return Flex(
-              direction: isNarrow ? Axis.vertical : Axis.horizontal,
-              crossAxisAlignment: isNarrow ? CrossAxisAlignment.center : CrossAxisAlignment.start,
-              children: [
-                SizedBox(
-                  width: isNarrow ? double.infinity : constraints.maxWidth * 0.35,
-                  child: Column(
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.circle, color: isDisabled ? Colors.redAccent : Colors.greenAccent, size: 12),
-                          const SizedBox(width: 4),
-                          Text(isDisabled ? "Disabled" : "Active", style: TextStyle(color: isDisabled ? Colors.redAccent : Colors.greenAccent, fontWeight: FontWeight.bold)),
-                          const Spacer(),
-                          Switch(
-                            value: !isDisabled,
-                            activeThumbColor: Colors.greenAccent,
-                            inactiveThumbColor: Colors.redAccent,
-                            onChanged: (val) {
-                              FirebaseDatabase.instance.ref('node_settings/$nodeId/is_disabled').set(!val);
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text(nodeId.toUpperCase(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
-                      const SizedBox(height: 4),
-                      Text("Lat: $latStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                      Text("Lng: $lngStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                      Text("Surface: $surfaceType", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                      const SizedBox(height: 16),
-                      Transform.rotate(
-                        angle: -(angle ?? 0.0) * (math.pi / 180), 
-                        child: Icon(Icons.arrow_upward, size: 40, color: (hasEvent && angle != null) ? (bothChannels ? Colors.amberAccent : Colors.redAccent) : Colors.grey.shade800),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        (hasEvent && angle != null) ? "${angle.toStringAsFixed(1)}°" : "N/A", 
-                        style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: (hasEvent && angle != null) ? Colors.white : Colors.grey)
-                      ),
-                      if (hasEvent) 
-                         Text(bothChannels ? "(Gyroscope active)" : "(Accelerometer only)", style: const TextStyle(fontSize: 10, color: Colors.amberAccent)),
-                    ],
-                  ),
-                ),
-                if (!isNarrow) const SizedBox(width: 16),
-                if (isNarrow) const SizedBox(height: 24),
-                Expanded(
-                  flex: isNarrow ? 0 : 1,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text("LIVE TELEMETRY STREAM", style: TextStyle(fontSize: 10, letterSpacing: 1.5, color: Colors.grey)),
-                      const SizedBox(height: 8),
-                      Container(
-                        height: 80,
-                        decoration: BoxDecoration(border: Border.all(color: Colors.white10), color: Colors.black26),
-                        child: AnimatedBuilder(
-                          animation: _waveAnimationController,
-                          builder: (context, child) {
-                             final waveform = _telemetryState.nodeWaveforms[nodeId] ?? List.filled(60, 0.0);
-                             return CustomPaint(painter: LiveStreamPainter(waveform, _telemetryState.headIndex));
-                          }
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text("LATEST DISTURBANCE PROFILE", style: TextStyle(fontSize: 10, letterSpacing: 1.5, color: Colors.grey)),
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(4)),
-                        child: Wrap(
-                          alignment: WrapAlignment.spaceBetween,
-                          spacing: 16,
-                          runSpacing: 16,
-                          children: [
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text("LOCAL VELOCITY (6C)", style: TextStyle(fontSize: 10, color: Colors.grey)),
-                                const SizedBox(height: 4),
-                                Text(apparentVelocity != null ? "${apparentVelocity.toStringAsFixed(0)} m/s" : (hasEvent ? "N/A" : "STANDBY"), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                              ],
-                            ),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text("CHANNEL STATE", style: TextStyle(fontSize: 10, color: Colors.grey)),
-                                const SizedBox(height: 4),
-                                Text(
-                                  !hasEvent ? "STANDBY" : (accelSaturated ? "Accel saturated" : (bothChannels ? "Both channels" : "Accelerometer only")), 
-                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: accelSaturated ? Colors.orangeAccent : Colors.white)
-                                ),
-                              ],
-                            )
-                          ],
-                        ),
-                      )
-                    ],
-                  ),
-                )
-              ],
-            );
-          }
-        ),
+  Widget _buildStatusRail() {
+    final total = _activeNodes.length;
+    final live = _activeNodeCount();
+    return Container(
+      height: 46,
+      decoration: const BoxDecoration(
+        color: Ds.panel,
+        border: Border(bottom: BorderSide(color: Ds.hairline)),
       ),
-    );
-  }
-
-  Widget _buildMapTab() {
-    return Stack(
-      children: [
-        RepaintBoundary(
-          child: FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _hubLocation,
-              initialZoom: 16.0,
-              onMapReady: () {
-                if (!mounted) return;
-                setState(() => _isMapReady = true);
-                if (_isTectonicOverlayActive) {
-                  _updateVisibleLines(_mapController.camera);
-                }
-              },
-              onPositionChanged: (position, hasGesture) { 
-                _updateVisibleLines(_mapController.camera);
-              },
-            ),
-            children: [
-              TileLayer(
-                urlTemplate: "https://api.maptiler.com/maps/$_currentMapStyle/{z}/{x}/{y}.png?key=$mapTilerKey",
-                userAgentPackageName: 'com.mrp.seismic_network', 
-              ),
-              if (_isTectonicOverlayActive)
-                PolylineLayer(
-                  polylines: _tectonicLines,
-                ),
-              MarkerLayer(
-                markers: _cachedMarkers,
-              ),
-            ],
-          ), 
-        ), 
-
-        Positioned(
-          top: 16,
-          left: 16,
-          child: Card(
-            color: const Color(0xFF16161F).withValues(alpha: 0.9),
-            child: Padding(
-              padding: const EdgeInsets.all(12.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
+      padding: const EdgeInsets.symmetric(horizontal: Ds.s4),
+      child: Row(
+        children: [
+          StatusDot(_networkHealthColor, size: 9),
+          const SizedBox(width: Ds.s3),
+          Text('GyroHub', style: Ds.title),
+          const SizedBox(width: Ds.s2),
+          Text(_hubId, style: Ds.mono(size: 11, color: Ds.inkMuted)),
+          const SizedBox(width: Ds.s5),
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
                 children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.public, color: Colors.purpleAccent, size: 20),
-                      const SizedBox(width: 8),
-                      const Text("Tectonic Plates", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
-                      const SizedBox(width: 8),
-                      Switch(
-                        value: _isTectonicOverlayActive,
-                        onChanged: (val) => _toggleTectonicGeoJson(val),
-                        activeThumbColor: Colors.purpleAccent,
-                      ),
-                      if (_isLoadingGeoJson)
-                        const Padding(
-                          padding: EdgeInsets.only(left: 8.0),
-                          child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-                        )
-                    ],
+                  RailStat(
+                    label: 'Nodes',
+                    value: '$live/$total',
+                    dot: total == 0 ? Ds.inert : (live < total ? Ds.caution : Ds.nominal),
+                    tooltip: total == 0 ? 'No nodes connected' : '$live reporting, ${total - live} disabled',
+                  ),
+                  const SizedBox(width: Ds.s5),
+                  RailStat(
+                    label: 'Events',
+                    value: '${_activeEstimates.length}',
+                    dot: _activeEstimates.isEmpty ? Ds.inert : Ds.alert,
+                    tooltip: 'Disturbances currently being tracked',
+                  ),
+                  const SizedBox(width: Ds.s5),
+                  RailStat(
+                    label: 'Hubs',
+                    value: '${_activeHubs.length}',
+                    dot: Ds.inert,
+                    tooltip: 'Other consoles watching this network',
                   ),
                 ],
               ),
             ),
           ),
-        ),
-
-        Positioned(
-          top: 16,
-          right: 16,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              FloatingActionButton(
-                mini: true,
-                backgroundColor: const Color(0xFF16161F),
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  side: const BorderSide(color: Colors.white10),
-                ),
-                child: const Icon(Icons.layers),
-                onPressed: () => setState(() => _isMapMenuExpanded = !_isMapMenuExpanded),
-              ),
-              if (_isMapMenuExpanded)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8.0),
-                  child: Card(
-                    color: const Color(0xFF16161F).withValues(alpha: 0.95),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      side: const BorderSide(color: Colors.white10),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 12.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          const Text("MapTiler Views", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 12)),
-                          const SizedBox(height: 8),
-                          ...[
-                            'basic-v2', 'basic-v2-dark', 'streets-v2', 'satellite', 
-                            'hybrid', 'topo-v2', 'dataviz', 'dataviz-dark', 'ocean'
-                          ].map((style) => InkWell(
-                            onTap: () => setState(() {
-                              _currentMapStyle = style;
-                              _isMapMenuExpanded = false;
-                            }),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 6.0),
-                              child: Text(
-                                style.toUpperCase(),
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: _currentMapStyle == style ? Colors.blueAccent : Colors.white70,
-                                  fontWeight: _currentMapStyle == style ? FontWeight.bold : FontWeight.normal,
-                                ),
-                              ),
-                            ),
-                          )),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-
-        Positioned(
-          bottom: 16,
-          right: 16,
-          child: FloatingActionButton.extended(
-            heroTag: 'purge_btn',
-            backgroundColor: Colors.orangeAccent.withValues(alpha: 0.9),
-            icon: const Icon(Icons.cleaning_services, color: Colors.white),
-            label: const Text("CLEAR INACTIVE", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          IconButton(
+            icon: const Icon(Icons.cleaning_services_outlined, size: 18),
+            tooltip: 'Clear inactive devices',
             onPressed: _purgeInactiveDevices,
           ),
-        ),
-        
-        if (_isTectonicOverlayActive)
-          Positioned(
-            bottom: 16,
-            left: 16,
-            child: Card(
-              color: const Color(0xFF16161F).withValues(alpha: 0.9),
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text("Tectonic Boundaries Legend", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.white)),
-                    const SizedBox(height: 10),
-                    _buildLegendItem(Colors.redAccent, "Subduction (SUB)"),
-                    _buildLegendItem(Colors.orangeAccent, "Continental Conv. (CCB)"),
-                    _buildLegendItem(Colors.greenAccent, "Continental Trans. (CTF)"),
-                    _buildLegendItem(Colors.deepPurpleAccent, "Continental Rift (CRB)"),
-                    _buildLegendItem(Colors.blueAccent, "Oceanic Spreading (OSR)"),
-                    _buildLegendItem(Colors.lightGreenAccent, "Oceanic Trans. (OTF)"),
-                    _buildLegendItem(Colors.pinkAccent, "Oceanic Conv. (OCR)"),
-                  ],
-                ),
+          IconButton(
+            icon: const Icon(Icons.tune, size: 18),
+            tooltip: 'Network settings',
+            onPressed: _showSettingsMenu,
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout, size: 18),
+            tooltip: 'Sign out',
+            onPressed: () async {
+              await FirebaseAuth.instance.signOut();
+              if (!context.mounted) return;
+              Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const RoleSelectionScreen()));
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWideConsole() {
+    return Padding(
+      padding: const EdgeInsets.all(Ds.s3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(width: 330, child: _buildEventsColumn()),
+          const SizedBox(width: Ds.s3),
+          Expanded(
+            child: Column(
+              children: [
+                Expanded(child: _buildMapPanel()),
+                const SizedBox(height: Ds.s3),
+                SizedBox(height: 172, child: _buildNetworkTracePanel()),
+              ],
+            ),
+          ),
+          const SizedBox(width: Ds.s3),
+          SizedBox(width: 340, child: _buildNodesPanel()),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMediumConsole() {
+    return Padding(
+      padding: const EdgeInsets.all(Ds.s3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: 320,
+            child: Column(
+              children: [
+                Expanded(child: _buildEventsColumn()),
+                const SizedBox(height: Ds.s3),
+                Expanded(child: _buildNodesPanel()),
+              ],
+            ),
+          ),
+          const SizedBox(width: Ds.s3),
+          Expanded(
+            child: Column(
+              children: [
+                Expanded(child: _buildMapPanel()),
+                const SizedBox(height: Ds.s3),
+                SizedBox(height: 158, child: _buildNetworkTracePanel()),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNarrowConsole() {
+    return DefaultTabController(
+      length: 4,
+      child: Column(
+        children: [
+          Container(
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: Ds.hairline)),
+            ),
+            child: TabBar(
+              isScrollable: true,
+              tabAlignment: TabAlignment.start,
+              indicatorColor: Ds.nominal,
+              labelColor: Ds.ink,
+              unselectedLabelColor: Ds.inkMuted,
+              labelStyle: Ds.mono(size: 12, weight: FontWeight.w600),
+              unselectedLabelStyle: Ds.mono(size: 12, weight: FontWeight.w500),
+              tabs: const [
+                Tab(text: 'Map'),
+                Tab(text: 'Events'),
+                Tab(text: 'Nodes'),
+                Tab(text: 'History'),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(Ds.s3),
+              child: TabBarView(
+                physics: const NeverScrollableScrollPhysics(),
+                children: [
+                  Column(
+                    children: [
+                      Expanded(child: _buildMapPanel()),
+                      const SizedBox(height: Ds.s3),
+                      SizedBox(height: 140, child: _buildNetworkTracePanel()),
+                    ],
+                  ),
+                  _buildEventsPanel(),
+                  _buildNodesPanel(),
+                  _buildHistoryPanel(),
+                ],
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  /// Left column on desktop: active events on top, history beneath. Both
+  /// stay visible - a fresh detection reads very differently when you can
+  /// see what came before it without switching views.
+  Widget _buildEventsColumn() {
+    return Column(
+      children: [
+        Expanded(flex: 3, child: _buildEventsPanel()),
+        const SizedBox(height: Ds.s3),
+        Expanded(flex: 2, child: _buildHistoryPanel()),
       ],
     );
   }
 
-  Widget _buildHistoryTab() {
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-          color: const Color(0xFF111118),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                "EVENT LOGS",
-                style: TextStyle(color: Colors.white54, fontWeight: FontWeight.bold, letterSpacing: 1.2),
+  // -- Events ----------------------------------------------------------
+
+  Widget _buildEventsPanel() {
+    final events = _activeEstimates.entries.toList();
+    return InstrumentPanel(
+      label: 'Active events',
+      accent: events.isEmpty ? null : Ds.alert,
+      padding: EdgeInsets.zero,
+      trailing: Text('${events.length}', style: Ds.mono(size: 12, color: events.isEmpty ? Ds.inkMuted : Ds.alert)),
+      child: events.isEmpty
+          ? const SingleChildScrollView(
+              child: EmptyState(
+                icon: Icons.graphic_eq,
+                message: 'Nothing moving right now.',
+                hint: 'Detections appear here the moment a node reports one.',
               ),
-              IconButton(
-                icon: const Icon(Icons.delete_sweep, color: Colors.redAccent),
-                tooltip: "Clear History",
-                onPressed: () => _showClearHistoryDialog(context),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.all(Ds.s3),
+              itemCount: events.length,
+              separatorBuilder: (_, __) => const SizedBox(height: Ds.s3),
+              itemBuilder: (context, i) => _buildEventCard(events[i].key, events[i].value),
+            ),
+    );
+  }
+
+  /// The console's one deliberately bold element. Every figure here is
+  /// paired with how much it can be trusted: the uncertainty bar, the
+  /// method's maturity, and how many nodes actually contributed.
+  Widget _buildEventCard(String eventId, HypocentreEstimate est) {
+    final isHighlighted = _highlightedEpicenterId == eventId;
+    final nodeCount = est.associatedNodeIds.length;
+    final km = est.horizontalUncertaintyMeters / 1000.0;
+    // Spread is scaled against a 25 km reference: at or beyond that, the
+    // estimate is effectively unconstrained for a local network.
+    final spread = (est.horizontalUncertaintyMeters / 25000.0).clamp(0.0, 1.0);
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() {
+        _highlightedEpicenterId = eventId;
+        _rebuildCachedMarkers();
+      }),
+      onExit: (_) => setState(() {
+        if (_highlightedEpicenterId == eventId) _highlightedEpicenterId = null;
+        _rebuildCachedMarkers();
+      }),
+      child: GestureDetector(
+        onTap: () {
+          setState(() {
+            _highlightedEpicenterId = eventId;
+            _rebuildCachedMarkers();
+          });
+          if (_isMapReady) {
+            try {
+              _mapController.move(LatLng(est.latitude, est.longitude), 15.0);
+            } catch (_) {}
+          }
+        },
+        child: Container(
+          padding: const EdgeInsets.all(Ds.s3),
+          decoration: BoxDecoration(
+            color: isHighlighted ? Ds.panelRaised : Ds.abyss,
+            border: Border.all(color: isHighlighted ? Ds.alert.withValues(alpha: 0.7) : Ds.hairlineFaint),
+            borderRadius: BorderRadius.circular(Ds.rPanel),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const StatusDot(Ds.alert, size: 7),
+                  const SizedBox(width: Ds.s2),
+                  Expanded(
+                    child: Text(
+                      '${est.latitude.toStringAsFixed(4)}, ${est.longitude.toStringAsFixed(4)}',
+                      style: Ds.mono(size: 13, weight: FontWeight.w600),
+                    ),
+                  ),
+                  StateChip(
+                    '$nodeCount node${nodeCount == 1 ? '' : 's'}',
+                    nodeCount >= 4 ? Ds.nominal : Ds.caution,
+                    tooltip: nodeCount >= 4
+                        ? 'Enough nodes to constrain depth'
+                        : 'Too few nodes to pin this down well',
+                  ),
+                ],
+              ),
+              const SizedBox(height: Ds.s3),
+              ConfidenceBar(
+                spread: spread,
+                caption: '±${km.toStringAsFixed(1)} km horizontal',
+              ),
+              const SizedBox(height: Ds.s3),
+              Row(
+                children: [
+                  Expanded(
+                    child: Readout(
+                      label: 'Depth',
+                      value: est.depthMeters == null ? null : (est.depthMeters! / 1000).toStringAsFixed(1),
+                      unit: est.depthMeters == null ? null : 'km',
+                      uncertainty: est.depthMeters == null
+                          ? null
+                          : '${(est.depthUncertaintyMeters / 1000).toStringAsFixed(1)}',
+                      unresolvedNote: 'not resolved',
+                    ),
+                  ),
+                  const SizedBox(width: Ds.s3),
+                  Expanded(
+                    child: Readout(
+                      label: 'Origin',
+                      value: _formatClock(est.originTimeUs),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: Ds.s3),
+              const PanelRule(),
+              const SizedBox(height: Ds.s2),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: Text(est.methodLabel, style: Ds.label.copyWith(color: Ds.inkDim))),
+                  const SizedBox(width: Ds.s2),
+                  if (est.maturity == MethodMaturity.exotic)
+                    const StateChip(
+                      'research',
+                      Ds.research,
+                      icon: Icons.science_outlined,
+                      tooltip: 'Active-research technique, not settled practice. Treat with caution.',
+                    )
+                  else
+                    const StateChip('standard', Ds.nominal, tooltip: 'Established seismological method'),
+                ],
               ),
             ],
           ),
         ),
-        
-        Expanded(
-          child: StreamBuilder<DatabaseEvent>(
-            stream: FirebaseDatabase.instance
-                .ref('telemetry_history')
-                .orderByChild('timestamp_us')
-                .limitToLast(50) 
-                .onValue,
-            builder: (context, snapshot) {
-              if (snapshot.hasError) {
-                return Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Text(
-                      "Error loading history:\n${snapshot.error}", 
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.redAccent)
+      ),
+    );
+  }
+
+  String _formatClock(double micros) {
+    if (micros <= 0) return '--:--:--';
+    final dt = DateTime.fromMicrosecondsSinceEpoch(micros.round());
+    return '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}:'
+        '${dt.second.toString().padLeft(2, '0')}';
+  }
+
+  // -- Nodes -----------------------------------------------------------
+
+  Widget _buildNodesPanel() {
+    final ids = _activeNodes.keys.toList();
+    return InstrumentPanel(
+      label: 'Nodes',
+      padding: EdgeInsets.zero,
+      trailing: Text('${_activeNodeCount()}/${ids.length}', style: Ds.mono(size: 12, color: Ds.inkMuted)),
+      child: ids.isEmpty
+          ? const SingleChildScrollView(
+              child: EmptyState(
+                icon: Icons.sensors_off,
+                message: 'No nodes connected.',
+                hint: 'Open the app on a phone and start it as a node.',
+              ),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.all(Ds.s3),
+              itemCount: ids.length,
+              separatorBuilder: (_, __) => const SizedBox(height: Ds.s2),
+              itemBuilder: (context, i) => _buildNodeRow(ids[i]),
+            ),
+    );
+  }
+
+  Widget _buildNodeRow(String nodeId) {
+    final latest = _nodeLatestEvents[nodeId];
+    final loc = _activeNodes[nodeId];
+    final disabled = _disabledNodes[nodeId] ?? false;
+    final waveform = _telemetryState.nodeWaveforms[nodeId] ?? List.filled(60, 0.0);
+
+    final saturated = latest?['accel_saturated'] == true;
+    final bothChannels = saturated || latest?['channel_state'] == 'bothChannelsUsable';
+    final surface = latest?['surface_type']?.toString() ?? 'unknown';
+    final azimuth = (latest?['azimuth_true_deg'] as num?)?.toDouble();
+    final azimuthResolved = latest?['azimuth_resolved'] == true;
+
+    return Container(
+      padding: const EdgeInsets.all(Ds.s3),
+      decoration: BoxDecoration(
+        color: Ds.abyss,
+        border: Border.all(color: disabled ? Ds.alert.withValues(alpha: 0.3) : Ds.hairlineFaint),
+        borderRadius: BorderRadius.circular(Ds.rPanel),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              StatusDot(disabled ? Ds.alert : Ds.nominal, size: 7),
+              const SizedBox(width: Ds.s2),
+              Expanded(child: Text(nodeId, style: Ds.mono(size: 12.5, weight: FontWeight.w600))),
+              Transform.scale(
+                scale: 0.72,
+                child: Switch(
+                  value: !disabled,
+                  onChanged: (v) => FirebaseDatabase.instance.ref('node_settings/$nodeId/is_disabled').set(!v),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: Ds.s1),
+          TraceView(
+            data: waveform,
+            headIndex: _telemetryState.headIndex,
+            height: 40,
+            showGrid: false,
+            color: disabled ? Ds.inert : Ds.trace,
+          ),
+          const SizedBox(height: Ds.s2),
+          Wrap(
+            spacing: Ds.s1,
+            runSpacing: Ds.s1,
+            children: [
+              if (saturated)
+                const StateChip('clipped', Ds.alert,
+                    icon: Icons.warning_amber_rounded,
+                    tooltip: 'Accelerometer maxed out - amplitude from this node is unreliable'),
+              StateChip(
+                bothChannels ? 'accel + gyro' : 'accel only',
+                bothChannels ? Ds.nominal : Ds.inkMuted,
+                tooltip: bothChannels
+                    ? 'Gyroscope picked up rotation too'
+                    : 'Gyroscope stayed at its noise floor',
+              ),
+              StateChip(
+                surface,
+                surface == 'soft' ? Ds.caution : (surface == 'hard' ? Ds.nominal : Ds.inkMuted),
+                tooltip: surface == 'soft'
+                    ? 'Soft surface damps vibration - this node is weighted lower'
+                    : 'Resting surface classification',
+              ),
+              if (azimuth != null)
+                StateChip(
+                  azimuthResolved ? '${azimuth.toStringAsFixed(0)}°' : '${azimuth.toStringAsFixed(0)}° ±180',
+                  azimuthResolved ? Ds.nominal : Ds.caution,
+                  icon: Icons.navigation_outlined,
+                  tooltip: azimuthResolved
+                      ? 'Direction to source, confirmed by rotation data'
+                      : 'Direction is an axis only - source could be either way along it',
+                ),
+            ],
+          ),
+          if (loc != null) ...[
+            const SizedBox(height: Ds.s2),
+            Text(
+              '${loc.latitude.toStringAsFixed(3)}, ${loc.longitude.toStringAsFixed(3)}',
+              style: Ds.mono(size: 10.5, color: Ds.inkMuted, weight: FontWeight.w400),
+            ),
+          ],
+          const SizedBox(height: Ds.s2),
+          Row(
+            children: [
+              Expanded(
+                child: Text('Sensitivity', style: Ds.label),
+              ),
+              Text(
+                (_nodeSensitivities[nodeId] ?? 1.0).toStringAsFixed(2),
+                style: Ds.mono(size: 11, color: Ds.inkDim),
+              ),
+              const SizedBox(width: Ds.s2),
+              InkWell(
+                onTap: () => _showNodeSettings(nodeId),
+                child: const Padding(
+                  padding: EdgeInsets.all(2),
+                  child: Icon(Icons.tune, size: 14, color: Ds.inkMuted),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // -- Network trace ----------------------------------------------------
+
+  Widget _buildNetworkTracePanel() {
+    return InstrumentPanel(
+      label: 'Network motion',
+      trailing: Text(
+        _activeNodes.isEmpty ? 'idle' : 'live',
+        style: Ds.mono(size: 11, color: _activeNodes.isEmpty ? Ds.inkMuted : Ds.trace),
+      ),
+      padding: const EdgeInsets.all(Ds.s3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: RepaintBoundary(
+              child: AnimatedBuilder(
+                animation: _waveAnimationController,
+                builder: (context, child) => TraceView(
+                  data: _telemetryState.networkPeakWaveform,
+                  headIndex: _telemetryState.headIndex,
+                  height: double.infinity,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: Ds.s2),
+          Text('Strongest motion seen anywhere on the network', style: Ds.label),
+        ],
+      ),
+    );
+  }
+
+  // -- Map --------------------------------------------------------------
+
+  Widget _buildMapPanel() {
+    return InstrumentPanel(
+      label: 'Map',
+      padding: EdgeInsets.zero,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_isLoadingGeoJson)
+            const Padding(
+              padding: EdgeInsets.only(right: Ds.s2),
+              child: SizedBox(width: 11, height: 11, child: CircularProgressIndicator(strokeWidth: 1.5)),
+            ),
+          Text('Plate boundaries', style: Ds.label),
+          const SizedBox(width: Ds.s1),
+          Transform.scale(
+            scale: 0.66,
+            child: Switch(
+              value: _isTectonicOverlayActive,
+              onChanged: (val) => _toggleTectonicGeoJson(val),
+            ),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(Ds.rPanel)),
+        child: Stack(
+          children: [
+            RepaintBoundary(
+              child: FlutterMap(
+                mapController: _mapController,
+                options: MapOptions(
+                  initialCenter: _hubLocation,
+                  initialZoom: 16.0,
+                  onMapReady: () {
+                    if (!mounted) return;
+                    setState(() => _isMapReady = true);
+                    if (_isTectonicOverlayActive) {
+                      _updateVisibleLines(_mapController.camera);
+                    }
+                  },
+                  onPositionChanged: (position, hasGesture) {
+                    _updateVisibleLines(_mapController.camera);
+                  },
+                ),
+                children: [
+                  TileLayer(
+                    urlTemplate: "https://api.maptiler.com/maps/$_currentMapStyle/{z}/{x}/{y}.png?key=$mapTilerKey",
+                    userAgentPackageName: 'com.mrp.seismic_network',
+                  ),
+                  if (_isTectonicOverlayActive) PolylineLayer(polylines: _tectonicLines),
+                  AnimatedOpacity(
+                    duration: const Duration(milliseconds: 150),
+                    opacity: _highlightedCircleMarker != null ? 1.0 : 0.0,
+                    child: CircleLayer(
+                      circles: _highlightedCircleMarker != null ? [_highlightedCircleMarker!] : [],
                     ),
-                  )
-                );
-              }
-              
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator(color: Colors.purpleAccent));
-              }
+                  ),
+                  MarkerLayer(markers: _cachedMarkers),
+                ],
+              ),
+            ),
+            Positioned(top: Ds.s3, right: Ds.s3, child: _buildMapStyleControl()),
+            if (_isTectonicOverlayActive)
+              Positioned(bottom: Ds.s3, left: Ds.s3, child: _buildTectonicLegend()),
+          ],
+        ),
+      ),
+    );
+  }
 
-              final rawData = snapshot.data?.snapshot.value;
-              if (rawData == null) {
-                return const Center(child: Text("No historical events recorded.", style: TextStyle(color: Colors.grey)));
-              }
-
-              List<Map<String, dynamic>> events = [];
-              
-              if (rawData is Map) {
-                rawData.forEach((key, value) {
-                  if (value is Map) events.add(Map<String, dynamic>.from(value));
-                });
-              } else if (rawData is List) {
-                for (var value in rawData) {
-                  if (value is Map) events.add(Map<String, dynamic>.from(value));
-                }
-              }
-
-              if (events.isEmpty) {
-                return const Center(child: Text("No VALID historical events found.", style: TextStyle(color: Colors.grey)));
-              }
-
-              events.sort((a, b) => (b['timestamp_us'] as num).compareTo(a['timestamp_us'] as num)); 
-
-              return ListView.builder(
-                padding: const EdgeInsets.all(16.0),
-                itemCount: events.length,
-                itemBuilder: (context, index) {
-                  final event = events[index];
-                  final dateStr = event['date_string'] ?? '';
-                  final nodeId = event['node_id'] ?? 'Unknown';
-                  final speed = (event['apparent_velocity_mps'] as num?)?.toStringAsFixed(1) ?? 'N/A';
-                  final angle = (event['azimuth_true_deg'] as num?)?.toStringAsFixed(1) ?? 'N/A';
-                  final bool bothChannels = event['accel_saturated'] == true || event['channel_state'] == 'bothChannelsUsable';
-                  
-                  DateTime? dt = DateTime.tryParse(dateStr);
-                  String timeFormatted = dt != null 
-                      ? "${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}" 
-                      : dateStr;
-
-                  return Card(
-                    color: const Color(0xFF16161F),
-                    shape: RoundedRectangleBorder(
-                      side: const BorderSide(color: Colors.white10, width: 1), 
-                      borderRadius: BorderRadius.circular(8)
-                    ),
-                    margin: const EdgeInsets.only(bottom: 8.0),
-                    child: ListTile(
-                      leading: const Icon(Icons.waves, color: Colors.purpleAccent, size: 30),
-                      title: Text("Disturbance at ${nodeId.toUpperCase()}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueAccent)),
-                      subtitle: Padding(
-                        padding: const EdgeInsets.only(top: 4.0),
-                        child: Text("Time: $timeFormatted\nLocal velocity: $speed m/s  |  Azimuth: $angle°"),
+  Widget _buildMapStyleControl() {
+    const styles = [
+      'satellite', 'hybrid', 'basic-v2-dark', 'dataviz-dark',
+      'streets-v2', 'topo-v2', 'basic-v2', 'dataviz', 'ocean',
+    ];
+    return Container(
+      decoration: BoxDecoration(
+        color: Ds.panel.withValues(alpha: 0.94),
+        border: Border.all(color: Ds.hairline),
+        borderRadius: BorderRadius.circular(Ds.rPanel),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _isMapMenuExpanded = !_isMapMenuExpanded),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: Ds.s3, vertical: Ds.s2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.layers_outlined, size: 14, color: Ds.inkDim),
+                  const SizedBox(width: Ds.s2),
+                  Text(_currentMapStyle, style: Ds.mono(size: 11, color: Ds.ink)),
+                  const SizedBox(width: Ds.s1),
+                  Icon(
+                    _isMapMenuExpanded ? Icons.expand_less : Icons.expand_more,
+                    size: 14,
+                    color: Ds.inkMuted,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_isMapMenuExpanded) ...[
+            const PanelRule(),
+            ...styles.map((style) {
+              final selected = _currentMapStyle == style;
+              return InkWell(
+                onTap: () => setState(() {
+                  _currentMapStyle = style;
+                  _isMapMenuExpanded = false;
+                }),
+                child: Container(
+                  width: 152,
+                  padding: const EdgeInsets.symmetric(horizontal: Ds.s3, vertical: Ds.s2),
+                  color: selected ? Ds.nominal.withValues(alpha: 0.12) : null,
+                  child: Row(
+                    children: [
+                      if (selected)
+                        const Icon(Icons.check, size: 11, color: Ds.nominal)
+                      else
+                        const SizedBox(width: 11),
+                      const SizedBox(width: Ds.s2),
+                      Text(
+                        style,
+                        style: Ds.mono(
+                          size: 11,
+                          color: selected ? Ds.nominal : Ds.inkDim,
+                          weight: selected ? FontWeight.w600 : FontWeight.w400,
+                        ),
                       ),
-                      trailing: bothChannels
-                          ? const Tooltip(
-                              message: "Both channels usable (gyroscope active)",
-                              child: Icon(Icons.threed_rotation, color: Colors.amberAccent, size: 24),
-                            ) 
-                          : null,
-                      isThreeLine: true,
-                    ),
-                  );
-                },
+                    ],
+                  ),
+                ),
+              );
+            }),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTectonicLegend() {
+    return Container(
+      padding: const EdgeInsets.all(Ds.s3),
+      decoration: BoxDecoration(
+        color: Ds.panel.withValues(alpha: 0.94),
+        border: Border.all(color: Ds.hairline),
+        borderRadius: BorderRadius.circular(Ds.rPanel),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('PLATE BOUNDARIES', style: Ds.bezelLabel),
+          const SizedBox(height: Ds.s2),
+          _buildLegendItem(Colors.redAccent, 'Subduction'),
+          _buildLegendItem(Colors.orangeAccent, 'Continental convergent'),
+          _buildLegendItem(Colors.greenAccent, 'Continental transform'),
+          _buildLegendItem(Colors.deepPurpleAccent, 'Continental rift'),
+          _buildLegendItem(Colors.blueAccent, 'Oceanic spreading'),
+          _buildLegendItem(Colors.lightGreenAccent, 'Oceanic transform'),
+          _buildLegendItem(Colors.pinkAccent, 'Oceanic convergent'),
+        ],
+      ),
+    );
+  }
+
+  // -- History ----------------------------------------------------------
+
+  Widget _buildHistoryPanel() {
+    return InstrumentPanel(
+      label: 'Recent detections',
+      padding: EdgeInsets.zero,
+      trailing: InkWell(
+        onTap: () => _showClearHistoryDialog(context),
+        child: const Padding(
+          padding: EdgeInsets.all(2),
+          child: Icon(Icons.delete_sweep_outlined, size: 15, color: Ds.inkMuted),
+        ),
+      ),
+      child: StreamBuilder<DatabaseEvent>(
+        stream: FirebaseDatabase.instance
+            .ref('telemetry_history')
+            .orderByChild('timestamp_us')
+            .limitToLast(50)
+            .onValue,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(
+              child: Padding(
+                padding: EdgeInsets.all(Ds.s5),
+                child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+              ),
+            );
+          }
+          final value = snapshot.data?.snapshot.value;
+          if (value == null) {
+            return const SingleChildScrollView(
+              child: EmptyState(
+                icon: Icons.history_toggle_off,
+                message: 'No detections logged yet.',
+                hint: 'Every reported disturbance lands here.',
+              ),
+            );
+          }
+
+          final raw = Map<dynamic, dynamic>.from(value as Map);
+          final events = raw.values.map((e) => Map<dynamic, dynamic>.from(e as Map)).toList()
+            ..sort((a, b) => ((b['timestamp_us'] as num?) ?? 0).compareTo((a['timestamp_us'] as num?) ?? 0));
+
+          return ListView.separated(
+            padding: const EdgeInsets.all(Ds.s3),
+            itemCount: events.length,
+            separatorBuilder: (_, __) => const SizedBox(height: Ds.s2),
+            itemBuilder: (context, i) {
+              final e = events[i];
+              final nodeId = e['node_id']?.toString() ?? 'unknown';
+              final az = (e['azimuth_true_deg'] as num?)?.toDouble();
+              final resolved = e['azimuth_resolved'] == true;
+              final both = e['accel_saturated'] == true || e['channel_state'] == 'bothChannelsUsable';
+              final ts = (e['timestamp_us'] as num?)?.toDouble() ?? 0;
+
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: Ds.s3, vertical: Ds.s2),
+                decoration: BoxDecoration(
+                  color: Ds.abyss,
+                  border: Border.all(color: Ds.hairlineFaint),
+                  borderRadius: BorderRadius.circular(Ds.rPanel),
+                ),
+                child: Row(
+                  children: [
+                    Text(_formatClock(ts), style: Ds.mono(size: 11.5, color: Ds.inkDim)),
+                    const SizedBox(width: Ds.s3),
+                    Expanded(child: Text(nodeId, style: Ds.mono(size: 11.5, weight: FontWeight.w600))),
+                    if (az != null) ...[
+                      Text(
+                        resolved ? '${az.toStringAsFixed(0)}°' : '${az.toStringAsFixed(0)}°±180',
+                        style: Ds.mono(size: 11, color: resolved ? Ds.inkDim : Ds.caution),
+                      ),
+                      const SizedBox(width: Ds.s2),
+                    ],
+                    StatusDot(both ? Ds.nominal : Ds.inert, size: 6, glow: false),
+                  ],
+                ),
               );
             },
-          ),
-        ),
-      ],
+          );
+        },
+      ),
     );
   }
 
   Widget _buildLegendItem(Color color, String label) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4.0),
+      padding: const EdgeInsets.only(bottom: 3.0),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(width: 16, height: 4, color: color),
-          const SizedBox(width: 8),
-          Text(label, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+          Container(width: 14, height: 2, color: color),
+          const SizedBox(width: Ds.s2),
+          Text(label, style: Ds.label),
         ],
       ),
     );
@@ -2312,45 +3048,6 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver, Tick
 // ----------------------------------------------------------------------
 // 5. LIVE STREAM PAINTER
 // ----------------------------------------------------------------------
-class LiveStreamPainter extends CustomPainter {
-  final List<double> data;
-  final int headIndex;
-
-  LiveStreamPainter(this.data, this.headIndex);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (data.isEmpty) return;
-
-    final paint = Paint()
-      ..color = Colors.greenAccent
-      ..strokeWidth = 1.5
-      ..style = PaintingStyle.stroke;
-
-    final path = Path();
-    final double stepX = size.width / (data.length > 1 ? data.length - 1 : 1);
-    
-    double maxVal = 0.1; 
-    for (double val in data) {
-      if (val > maxVal) maxVal = val;
-    }
-
-    for (int i = 0; i < data.length; i++) {
-      int circularIndex = (headIndex + i) % data.length;
-      
-      double x = i * stepX;
-      double normalized = (data[circularIndex] / maxVal).clamp(0.0, 1.0);
-      double y = size.height - (normalized * size.height);
-      
-      if (i == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
-    }
-    canvas.drawPath(path, paint);
-  }
-  
-  @override
-  bool shouldRepaint(covariant LiveStreamPainter oldDelegate) => true; 
-}
+// LiveStreamPainter was removed: replaced by TracePainter in
+// ui/instruments.dart, which draws a centred baseline, grid and gradient
+// fill instead of a bare polyline.

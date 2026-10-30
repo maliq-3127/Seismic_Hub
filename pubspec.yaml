@@ -40,6 +40,8 @@ dependencies:
   firebase_auth: ^5.7.0
   vector_math: ^2.2.0
   permission_handler: ^11.0.0
+  flutter_local_notifications: ^19.0.0
+  audioplayers: ^6.0.0
 
 dev_dependencies:
   flutter_test:
@@ -66,6 +68,7 @@ flutter:
     - assets/PB2002_steps_low.geojson
     - assets/PB2002_steps_medium.geojson
     - assets/PB2002_steps_high.geojson
+    - assets/sounds/alert.wav
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

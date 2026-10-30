@@ -82,6 +82,10 @@ class TriggerDetectedMsg {
   final double amplitude;
   final double? azimuthDegrees;
   final double? azimuthUncertaintyDegrees;
+  /// Whether the 6C sign check actually resolved the 180-degree
+  /// polarization ambiguity, as opposed to declining to guess. False
+  /// means the azimuth names an axis, not a direction.
+  final bool azimuthResolved;
   final double? apparentVelocityMps;
   final double? sMinusPSeconds;
   final ChannelDominanceState channelState;
@@ -95,6 +99,7 @@ class TriggerDetectedMsg {
     required this.amplitude,
     this.azimuthDegrees,
     this.azimuthUncertaintyDegrees,
+    this.azimuthResolved = false,
     this.apparentVelocityMps,
     this.sMinusPSeconds,
     required this.channelState,

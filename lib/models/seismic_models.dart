@@ -57,6 +57,12 @@ class TriggerObservation {
   final double? azimuthDegrees;
   final double? azimuthUncertaintyDegrees;
 
+  /// Whether the 6C sign check resolved the 180-degree polarization
+  /// ambiguity. When false, [azimuthDegrees] names an axis the wave
+  /// travelled along - the source could be at that bearing OR its
+  /// opposite - and the estimator scores both sides accordingly.
+  final bool azimuthResolved;
+
   /// Local apparent velocity from the 6C rotation/translation ratio. Only
   /// present when [channelState] is bothChannelsUsable (or the
   /// accelerometer-saturated override applies) and the ratio was numerically
@@ -85,6 +91,7 @@ class TriggerObservation {
     required this.amplitude,
     this.azimuthDegrees,
     this.azimuthUncertaintyDegrees,
+    this.azimuthResolved = false,
     this.apparentVelocityMps,
     this.sMinusPSeconds,
     required this.channelState,
@@ -104,6 +111,7 @@ class TriggerObservation {
         'amplitude': amplitude,
         'azimuth_true_deg': azimuthDegrees,
         'azimuth_uncertainty_deg': azimuthUncertaintyDegrees,
+        'azimuth_resolved': azimuthResolved,
         'apparent_velocity_mps': apparentVelocityMps,
         's_minus_p_seconds': sMinusPSeconds,
         'channel_state': channelState.name,
@@ -131,6 +139,7 @@ class TriggerObservation {
       amplitude: (json['amplitude'] as num?)?.toDouble() ?? 0.0,
       azimuthDegrees: _numD(json['azimuth_true_deg']),
       azimuthUncertaintyDegrees: _numD(json['azimuth_uncertainty_deg']),
+      azimuthResolved: json['azimuth_resolved'] == true,
       apparentVelocityMps: _numD(json['apparent_velocity_mps']),
       sMinusPSeconds: _numD(json['s_minus_p_seconds']),
       channelState: ChannelDominanceState.values.firstWhere(

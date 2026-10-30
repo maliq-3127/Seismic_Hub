@@ -10,6 +10,9 @@
     <!-- Required for Throttling Prevention -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- Required for Notifications -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:label="gyro_hub"
         android:name="${applicationName}"

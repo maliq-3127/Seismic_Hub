@@ -118,6 +118,17 @@ abstract class HypocentreStrategy {
 /// the classic reason to associate a node's P and S readings together in
 /// the first place, rather than treating the second as unrelated.
 ///
+/// The azimuth term is a two-component mixture, not a single Gaussian,
+/// whenever a reading's 180-degree ambiguity was NOT resolved (see
+/// TriggerObservation.azimuthResolved): plain accelerometer polarization
+/// resolves an axis the wave travelled along, not a direction, so the
+/// candidate 180 degrees opposite the reported bearing is scored as
+/// equally plausible rather than penalised as wrong. When
+/// node_processor.dart's 6C sign check DID resolve it - the verified
+/// Igel-relation correlation test - the reading is a real direction and
+/// scores unimodally. The gate is the actual outcome of that check, not
+/// an assumption from channel state.
+///
 /// Depth is handled the same way: rather than a hard "N nodes required"
 /// rule, a gentle shallow-favouring log-prior lets the data override it
 /// once enough nodes constrain the vertical dimension, and the depth
@@ -242,9 +253,32 @@ class HypocentreEstimator implements HypocentreStrategy {
 
         if (a.trust.useAzimuth && a.obs.azimuthDegrees != null) {
           final predictedBackAzimuth = _bearingDegrees(a.en.east, a.en.north, c.east, c.north);
-          final diff = _angularDifferenceDegrees(a.obs.azimuthDegrees!, predictedBackAzimuth);
           final sigma = a.obs.azimuthUncertaintyDegrees ?? _defaultAzimuthSigmaDegrees;
-          logL += -0.5 * math.pow(diff / sigma, 2) * a.trust.reliabilityWeight;
+          final diffPrimary = _angularDifferenceDegrees(a.obs.azimuthDegrees!, predictedBackAzimuth);
+          final logLPrimary = -0.5 * math.pow(diffPrimary / sigma, 2);
+
+          if (!a.obs.azimuthResolved) {
+            // The 6C sign check either wasn't possible or declined to
+            // guess, so this bearing names an *axis* the wave travelled
+            // along, not a direction - "the source is this way" and "the
+            // source is the exact opposite way" are equally consistent
+            // with it. Score both sides via a two-component mixture
+            // (equal prior weight, same sigma), combined in log-space
+            // with the standard log-sum-exp so near-zero-probability
+            // candidates don't underflow. Scoring only the reported side
+            // would collapse a single-node posterior onto the wrong side
+            // of what is genuinely a coin flip.
+            final diffOpposite = _angularDifferenceDegrees(a.obs.azimuthDegrees! + 180.0, predictedBackAzimuth);
+            final logLOpposite = -0.5 * math.pow(diffOpposite / sigma, 2);
+            final m = math.max(logLPrimary, logLOpposite);
+            final mixtureLogL = m + math.log(0.5 * math.exp(logLPrimary - m) + 0.5 * math.exp(logLOpposite - m));
+            logL += mixtureLogL * a.trust.reliabilityWeight;
+          } else {
+            // 6C sign check positively resolved which side the source is
+            // on (see node_processor.dart's _resolve180Ambiguity), so
+            // this is a real direction and scores unimodally.
+            logL += logLPrimary * a.trust.reliabilityWeight;
+          }
         }
 
         if (a.trust.useApparentVelocity && a.obs.apparentVelocityMps != null) {
