@@ -61,8 +61,9 @@ flutter:
   # the material Icons class.
   uses-material-design: true
   assets:
-    - assets/protomaps_tectonic_base/
-    - assets/data/tectonic_boundaries.geojson
+    - assets/PB2002_steps_low.geojson
+    - assets/PB2002_steps_medium.geojson
+    - assets/PB2002_steps_high.geojson
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

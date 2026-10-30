@@ -8,17 +8,20 @@ class DisturbanceResult {
   final double estimatedSpeedMps;
   final Duration resetTime;
   final int preciseTimestampUs;
+  final bool used3Axis;
 
   DisturbanceResult({
     required this.angleDegrees,
     required this.estimatedSpeedMps,
     required this.resetTime,
     required this.preciseTimestampUs,
+    required this.used3Axis,
   });
 }
 
 class DisturbanceDetector {
   double sensitivityMultiplier = 1.0;
+  bool enable3Axis = false; 
   DetectorState state = DetectorState.calibrating;
 
   // Streams
@@ -34,27 +37,25 @@ class DisturbanceDetector {
   // High-Pass Filter (HPF) State Variables
   double _prevX = 0.0;
   double _prevY = 0.0;
+  double _prevZ = 0.0;
   double _filteredX = 0.0;
   double _filteredY = 0.0;
-  // Alpha for High-Pass (removes gradual device tilting/drift) - Changed to mutable for Hub configuration
+  double _filteredZ = 0.0;
   double hpfAlpha = 0.9; 
 
-  // STA/LTA (Short-Term / Long-Term Average) State
+  // STA/LTA State
   double _staEnergy = 0.0;
   double _ltaEnergy = 0.0;
   
-  // Tuned EMA Constants for a ~50Hz sampling rate
-  final double _staAlpha = 0.077; // Responds to changes over ~0.5 seconds
-  final double _ltaAlpha = 0.004; // Tracks ambient room noise over ~10 seconds
-  
-  // The baseline spike ratio required to trigger a seismic event
+  final double _staAlpha = 0.077; 
+  final double _ltaAlpha = 0.004; 
   final double _baseTriggerRatio = 4.0; 
 
   // Calibration Tracking
   int _sampleCount = 0;
-  final int _calibrationSamplesRequired = 250; // 5 seconds at 50Hz
+  final int _calibrationSamplesRequired = 250; 
 
-  // Cooldown timer to prevent Firebase spamming during a long vibration
+  // Cooldown timer
   int _lastTriggerTimeMs = 0;
   final int _cooldownMs = 3000;
 
@@ -62,26 +63,28 @@ class DisturbanceDetector {
   int _accumulationCount = 0;
   double _accX = 0.0;
   double _accY = 0.0;
+  double _accZ = 0.0;
   bool _isAccumulating = false;
 
-  void processGyroscopeData(double x, double y) {
+  void processAccelerometerData(double x, double y, double z) {
     // 1. High-Pass Filter (O(1) operation)
-    // Isolates sudden jolts by subtracting the slow-moving difference
     _filteredX = hpfAlpha * (_filteredX + x - _prevX);
     _filteredY = hpfAlpha * (_filteredY + y - _prevY);
+    _filteredZ = hpfAlpha * (_filteredZ + z - _prevZ);
     _prevX = x;
     _prevY = y;
+    _prevZ = z;
 
     // 2. Kinetic Energy Calculation
-    // We use squared values to heavily penalize large spikes and ignore micro-vibrations
     double currentEnergy = (_filteredX * _filteredX) + (_filteredY * _filteredY);
+    if (enable3Axis) {
+       currentEnergy += (_filteredZ * _filteredZ);
+    }
     double magnitude = math.sqrt(currentEnergy);
 
-    // Send the raw filtered wave out to the Hub UI
     _waveController.add(magnitude);
 
-    // 3. Update STA/LTA (O(1) operation)
-    // No arrays, loops, or buffer shifting required
+    // 3. Update STA/LTA
     _staEnergy = _staAlpha * currentEnergy + (1.0 - _staAlpha) * _staEnergy;
     _ltaEnergy = _ltaAlpha * currentEnergy + (1.0 - _ltaAlpha) * _ltaEnergy;
 
@@ -98,11 +101,8 @@ class DisturbanceDetector {
     }
 
     // 5. Trigger Logic
-    // Prevent division-by-zero if phone is perfectly motionless
     double safeLta = math.max(_ltaEnergy, 0.00001);
     double energyRatio = _staEnergy / safeLta;
-
-    // Apply the remote sensitivity multiplier controlled from the Hub
     double effectiveThreshold = _baseTriggerRatio / math.max(sensitivityMultiplier, 0.1);
 
     if (energyRatio > effectiveThreshold || _isAccumulating) {
@@ -111,32 +111,42 @@ class DisturbanceDetector {
         _accumulationCount = 0;
         _accX = 0.0;
         _accY = 0.0;
+        _accZ = 0.0;
       }
 
-      // Sum up vectors for 5 frames (~100ms) to stabilize the direction
       _accX += _filteredX;
       _accY += _filteredY;
+      _accZ += _filteredZ;
       _accumulationCount++;
 
       if (_accumulationCount >= 5) {
-        _isAccumulating = false; // Reset for next event
+        _isAccumulating = false; 
         int now = DateTime.now().millisecondsSinceEpoch;
         if (now - _lastTriggerTimeMs > _cooldownMs) {
           _lastTriggerTimeMs = now;
-          _triggerDisturbance(_accX / 5, _accY / 5, magnitude);
+          _triggerDisturbance(_accX / 5, _accY / 5, _accZ / 5, magnitude);
         }
       }
     }
   }
 
-  void _triggerDisturbance(double fx, double fy, double mag) {
-    // Determine vector angle of the shockwave
-    double angleRad = math.atan2(fy, fx);
+  void _triggerDisturbance(double fx, double fy, double fz, double mag) {
+    double angleRad = math.atan2(fx, fy);
     double angleDeg = angleRad * (180.0 / math.pi);
+
+    // Apply Polarization Logic if 3-Axis is active
+    if (enable3Axis) {
+      // If initial motion is a compressional upward thrust (+Z), the wave is pushing outward.
+      // Therefore, the vector (fx, fy) points AWAY from the epicenter. We flip it 180°.
+      if (fz > 0) {
+        angleDeg += 180.0;
+      }
+    }
+
+    // Normalize angle
+    angleDeg = angleDeg % 360.0;
     if (angleDeg < 0) angleDeg += 360.0;
 
-    // Estimate propagation speed multiplier based on sheer kinetic force
-    // (Used by the Hub's spatial matching equation)
     double speed = 2500.0 + (mag * 350.0); 
 
     _disturbanceController.add(
@@ -145,6 +155,7 @@ class DisturbanceDetector {
         estimatedSpeedMps: speed,
         resetTime: Duration(milliseconds: _cooldownMs),
         preciseTimestampUs: DateTime.now().microsecondsSinceEpoch,
+        used3Axis: enable3Axis,
       )
     );
   }
