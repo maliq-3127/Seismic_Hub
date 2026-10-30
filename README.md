@@ -3,16 +3,8 @@
 A program designed to detect earthquakes and seismic activity.
 Designed by MaliqueRP - Sole Creator
 
-## Getting Started
-
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Resources Used:
+MapTiler - https://www.maptiler.com
+"tectonicplates" by "fraxen" - https://github.com/fraxen/tectonicplates
+"An updated digital model of plate boundaries" by Peter Bird - https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2001gc000252
+"Earthquakes: A Primer" by Dr. Bruce Bolt (1978) - https://archive.org/details/earthquakesprime00bolt
