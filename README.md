@@ -1,6 +1,7 @@
 # Seismic_Hub
 
 A program designed to detect earthquakes and seismic activity.
+Designed by MaliqueRP - Sole Creator
 
 ## Getting Started
 
