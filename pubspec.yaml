@@ -30,12 +30,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-
-  sensors_plus: ^5.0.1 #access device gyroscope
-  geolocator: ^13.0.0 #location for mapping
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  firebase_core: ^3.6.0
+  firebase_database: ^11.1.5
+  sensors_plus: ^6.1.0
 
 dev_dependencies:
   flutter_test:

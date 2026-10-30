@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "345080171965",
+    "firebase_url": "https://gyrohub-default-rtdb.firebaseio.com",
+    "project_id": "gyrohub",
+    "storage_bucket": "gyrohub.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:345080171965:android:b4a8f0bff1936d504f96d4",
+        "android_client_info": {
+          "package_name": "com.example.gyro_hub"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAwcsPWQb-cyOG75UH1WDDr_CQch5koJLw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
